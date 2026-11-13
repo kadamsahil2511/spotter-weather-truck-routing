@@ -1,0 +1,45 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+:root,
+[data-theme="light"] {
+  --accent: oklch(0.62 0.14 45);
+  --accent-foreground: oklch(0.985 0.01 80);
+  --background: oklch(0.985 0.004 80);
+  --foreground: oklch(0.28 0.02 50);
+  --surface: oklch(0.995 0.002 80);
+  --surface-foreground: oklch(0.28 0.02 50);
+  --default: oklch(0.94 0.01 70);
+  --default-foreground: oklch(0.28 0.02 50);
+  --link: oklch(0.4 0.04 45);
+  --focus: oklch(0.62 0.14 45);
+  --muted: oklch(0.5 0.02 55);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.map-shell {
+  min-height: 60vh;
+}
+
+@media (min-width: 768px) {
+  .map-shell {
+    min-height: 0;
+    height: 100%;
+  }
+}
+
+.maplibregl-map {
+  font-family: inherit;
+}
