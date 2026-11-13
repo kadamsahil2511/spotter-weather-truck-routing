@@ -4,11 +4,17 @@ import {
   Map,
   type MapLayerMouseEvent,
   NavigationControl,
+  setWorkerUrl,
 } from "maplibre-gl";
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import type { AnalyzeResponse, RouteResult } from "../types";
+
+// MapLibre 6 loads ./maplibre-gl-worker.mjs next to its own chunk. Vite does not
+// emit that sibling, so point it at the worker asset before any map is created.
+setWorkerUrl(maplibreWorkerUrl);
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 const WEIGHT = [0, 0.35, 0.65, 0.85, 1];
