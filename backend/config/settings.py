@@ -37,11 +37,10 @@ LOGGING = {
     },
     "root": {"handlers": ["stdout"], "level": LOG_LEVEL},
 }
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
-    if host.strip()
-]
+_allowed_hosts = os.environ.get("DJANGO_ALLOWED_HOSTS") or os.environ.get(
+    "ALLOWED_HOSTS", "localhost,127.0.0.1"
+)
+ALLOWED_HOSTS = [host.strip() for host in _allowed_hosts.split(",") if host.strip()]
 
 INSTALLED_APPS = [
     "corsheaders",

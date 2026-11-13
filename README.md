@@ -43,7 +43,7 @@ The dev server proxies `/api` to `http://127.0.0.1:8000`. For the compose API, s
 |---|---|
 | Codebase | One repo. `Dockerfile` and `docker-compose.yml` at the root are what the VPS builds. |
 | Dependencies | `backend/requirements.txt` in the image. `requirements-dev.txt` for pytest. `frontend/package-lock.json` via `npm ci`. |
-| Config | Environment variables. Debug off refuses a missing or placeholder `DJANGO_SECRET_KEY`. Hosts come from `DJANGO_ALLOWED_HOSTS`. |
+| Config | Environment variables. Debug off refuses a missing or placeholder `DJANGO_SECRET_KEY`. Hosts come from `DJANGO_ALLOWED_HOSTS`, with `ALLOWED_HOSTS` as the fallback. |
 | Backing services | Redis through `REDIS_URL`. Unset locally, the cache stays in process. |
 | Build, release, run | Image `fs-truck-api:<12-char SHA>`. The timer in `deploy/` releases only a SHA whose CI run succeeded. |
 | Processes | One stateless gunicorn process. No requests are stored on disk. |

@@ -3,4 +3,13 @@
 frontend
 backend/.env
 backend/.venv
+backend/tests
+backend/pytest.ini
+backend/requirements-dev.txt
+backend/dev.db
+backend/.pytest_cache
+**/.pytest_cache
 **/__pycache__
+**/*.pyc
+**/.mypy_cache
+**/.ruff_cache

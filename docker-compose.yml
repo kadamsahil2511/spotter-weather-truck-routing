@@ -9,7 +9,7 @@ services:
     stop_grace_period: 20s
     environment:
       DJANGO_DEBUG: "0"
-      ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-fsapi.kadamsahil.com,127.0.0.1,localhost}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-fsapi.kadamsahil.com,127.0.0.1,localhost}
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
