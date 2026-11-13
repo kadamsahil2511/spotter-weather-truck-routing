@@ -1,0 +1,15 @@
+[Unit]
+Description=Deploy fs-truck API if main has a green CI run
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fs-truck-deploy.sh
+Nice=19
+IOSchedulingClass=idle
+SyslogIdentifier=fs-truck-deploy
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,809 @@
+"""Route providers. The rest of the app sees RouteOption and nothing vendor-specific."""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+
+import httpx
+
+from app.geo import (
+    LineIndex,
+    bearing_deg,
+    cumulative_miles,
+    destination,
+    haversine,
+    point_at,
+    polyline_every,
+    resample_miles,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ORS_BASE_URL = "https://api.heigit.org/openrouteservice"
+# Deprecated host. Set ORS_BASE_URL to this if the HeiGIT path is unreachable.
+FALLBACK_ORS_BASE_URL = "https://api.openrouteservice.org"
+OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
+USER_AGENT = "truck-weather-routes/0.1"
+TARE_LB = 35_000
+KM_PER_MILE = 1.609344
+SHORT_HAUL_KM = 90.0
+DETOUR_LIMIT = 1.4
+
+
+def ors_directions_url(base: str | None = None) -> str:
+    """POST target for driving-hgv. Default includes the /openrouteservice prefix."""
+    root = base if base is not None else os.environ.get("ORS_BASE_URL", "")
+    root = root.strip() or DEFAULT_ORS_BASE_URL
+    return f"{root.rstrip('/')}/v2/directions/driving-hgv"
+
+
+class RoutingUnavailable(Exception):
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class PointNotRoutable(Exception):
+    """Origin or destination cannot be snapped to the road network."""
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+        super().__init__(f"The {endpoint} is not near a road the router can use.")
+
+
+@dataclass
+class Step:
+    distance_m: float
+    duration_s: float
+    start_index: int
+    end_index: int
+
+
+@dataclass
+class RouteOption:
+    id: str
+    label: str
+    provider: str
+    truck_profile: bool
+    distance_m: float
+    duration_s: float
+    coordinates: list[tuple[float, float]]
+    steps: list[Step]
+    warnings: list[str] = field(default_factory=list)
+    kind: str = "direct"
+    via: tuple[float, float] | None = None
+
+
+def decode_polyline(encoded: str, precision: int = 5) -> list[tuple[float, float]]:
+    """ORS polyline precision 5. The encoded order is lat, lon. We store lon, lat."""
+    factor = float(10**precision)
+    lat = 0
+    lon = 0
+    index = 0
+    coords: list[tuple[float, float]] = []
+    length = len(encoded)
+
+    def read() -> tuple[int, int]:
+        nonlocal index
+        result = 0
+        shift = 0
+        while True:
+            if index >= length:
+                raise ValueError("truncated polyline")
+            chunk = ord(encoded[index]) - 63
+            index += 1
+            result |= (chunk & 0x1F) << shift
+            shift += 5
+            if chunk < 0x20:
+                break
+        delta = ~(result >> 1) if result & 1 else result >> 1
+        return delta, index
+
+    while index < length:
+        dlat, index = read()
+        dlon, index = read()
+        lat += dlat
+        lon += dlon
+        coords.append((lon / factor, lat / factor))
+    return coords
+
+
+def ors_body(
+    coordinates: list[tuple[float, float]],
+    load_lb: float,
+    *,
+    alternatives: bool,
+    restrictions: bool,
+    preference: str,
+    radiuses: list[float] | None = None,
+) -> dict:
+    body: dict = {
+        "coordinates": [[lon, lat] for lon, lat in coordinates],
+        "units": "m",
+        "geometry": True,
+        "instructions": True,
+        "preference": preference,
+        "options": {"vehicle_type": "hgv"},
+    }
+    if restrictions:
+        tons = round((load_lb + TARE_LB) / 2204.62, 2)
+        body["options"]["profile_params"] = {
+            "restrictions": {"weight": tons, "height": 4.0, "width": 2.6}
+        }
+    if alternatives:
+        body["alternative_routes"] = {
+            "target_count": 3,
+            "share_factor": 0.6,
+            "weight_factor": 1.4,
+        }
+    if radiuses is not None:
+        body["radiuses"] = radiuses
+    return body
+
+
+def ors_error_code(response: httpx.Response) -> int | None:
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict) and error.get("code") is not None:
+        try:
+            return int(error["code"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def snap_endpoint(body: str) -> str:
+    """ORS names the failing coordinate. Index 0 is the origin, 1 the destination."""
+    match = re.search(r"coordinate\s+(\d+)", body)
+    if not match:
+        return "origin or destination"
+    index = int(match.group(1))
+    if index == 0:
+        return "origin"
+    if index == 1:
+        return "destination"
+    return "origin or destination"
+
+
+def parse_ors(payload: dict, *, truck_profile: bool) -> list[RouteOption]:
+    routes: list[RouteOption] = []
+    for raw in payload.get("routes") or []:
+        geometry = decode_polyline(raw["geometry"])
+        steps: list[Step] = []
+        for segment in raw.get("segments") or []:
+            for step in segment.get("steps") or []:
+                waypoints = step.get("way_points") or [0, 0]
+                steps.append(
+                    Step(
+                        distance_m=float(step.get("distance") or 0),
+                        duration_s=float(step.get("duration") or 0),
+                        start_index=int(waypoints[0]),
+                        end_index=int(waypoints[-1]),
+                    )
+                )
+        summary = raw.get("summary") or {}
+        routes.append(
+            RouteOption(
+                id="",
+                label="",
+                provider="ors-hgv",
+                truck_profile=truck_profile,
+                distance_m=float(summary.get("distance") or 0),
+                duration_s=float(summary.get("duration") or 0),
+                coordinates=geometry,
+                steps=steps,
+                kind="alternative",
+            )
+        )
+    return routes
+
+
+def parse_osrm(payload: dict) -> list[RouteOption]:
+    routes: list[RouteOption] = []
+    for raw in payload.get("routes") or []:
+        coordinates: list[tuple[float, float]] = []
+        steps: list[Step] = []
+        for leg in raw.get("legs") or []:
+            for step in leg.get("steps") or []:
+                geometry = step.get("geometry", {}).get("coordinates") or []
+                points = [(float(point[0]), float(point[1])) for point in geometry]
+                if coordinates and points and coordinates[-1] == points[0]:
+                    start = len(coordinates) - 1
+                    points = points[1:]
+                else:
+                    start = len(coordinates)
+                coordinates.extend(points)
+                end = max(len(coordinates) - 1, start)
+                steps.append(
+                    Step(
+                        distance_m=float(step.get("distance") or 0),
+                        duration_s=float(step.get("duration") or 0),
+                        start_index=start,
+                        end_index=end,
+                    )
+                )
+        if len(coordinates) < 2:
+            continue
+        routes.append(
+            RouteOption(
+                id="",
+                label="",
+                provider="osrm",
+                truck_profile=False,
+                distance_m=float(raw.get("distance") or 0),
+                duration_s=float(raw.get("duration") or 0),
+                coordinates=coordinates,
+                steps=steps,
+                warnings=["truck_profile_unavailable"],
+                kind="alternative",
+            )
+        )
+    return routes
+
+
+# id(list) is only safe while that list object is still referenced. The cache
+# holds the list so a recycled id cannot point at a different polyline.
+_index_cache: dict[int, tuple[list[tuple[float, float]], LineIndex]] = {}
+_share_cache: dict[tuple[int, int], tuple[list[tuple[float, float]], list[tuple[float, float]], float]] = {}
+_cache_lock = threading.Lock()
+
+
+def _index_for(coords: list[tuple[float, float]]) -> LineIndex:
+    key = id(coords)
+    with _cache_lock:
+        found = _index_cache.get(key)
+        if found is not None and found[0] is coords:
+            return found[1]
+        if len(_index_cache) > 24:
+            _index_cache.clear()
+    # ~1 mile skeleton, then a cell index. A corner can move by less than a
+    # mile, which does not change the 1-mile / 85% keep-or-drop decision.
+    simplified = resample_miles(coords, 1.0)
+    if len(simplified) < 2:
+        simplified = list(coords)
+    index = LineIndex(simplified)
+    with _cache_lock:
+        _index_cache[key] = (coords, index)
+    return index
+
+
+def _sample_miles(cumulative: list[float], step: float) -> list[float]:
+    total = cumulative[-1]
+    miles: list[float] = []
+    cursor = 0.0
+    while cursor <= total + 1e-9:
+        miles.append(min(cursor, total))
+        cursor += step
+        if miles[-1] >= total:
+            break
+    return miles
+
+
+def share_fraction(coords: list[tuple[float, float]], other: list[tuple[float, float]]) -> float:
+    """Fraction of 5-mile samples that sit within 1 mile of `other`.
+
+    Pair results are memoized, and each line is indexed once, so dedupe can
+    run again after every via without rewalking the raw ORS vertices.
+    """
+    pair = (id(coords), id(other))
+    with _cache_lock:
+        cached = _share_cache.get(pair)
+        if cached is not None and cached[0] is coords and cached[1] is other:
+            return cached[2]
+    cumulative = cumulative_miles(coords)
+    total = cumulative[-1] if cumulative else 0.0
+    if total <= 1e-6 or len(other) < 2:
+        result = 1.0
+    else:
+        index = _index_for(other)
+        near = 0
+        samples = _sample_miles(cumulative, 5.0)
+        cursor = 0
+        for mile in samples:
+            while cursor < len(cumulative) - 1 and cumulative[cursor + 1] + 1e-9 < mile:
+                cursor += 1
+            span = cumulative[cursor + 1] - cumulative[cursor] if cursor < len(cumulative) - 1 else 0.0
+            frac = 0.0 if span <= 1e-12 else (mile - cumulative[cursor]) / span
+            start = coords[cursor]
+            end = coords[min(cursor + 1, len(coords) - 1)]
+            lon = start[0] + frac * (end[0] - start[0])
+            lat = start[1] + frac * (end[1] - start[1])
+            if index.within(lon, lat, 1.0):
+                near += 1
+        result = near / len(samples)
+    with _cache_lock:
+        if len(_share_cache) > 256:
+            _share_cache.clear()
+        _share_cache[(id(coords), id(other))] = (coords, other, result)
+    return result
+
+
+def dedupe(routes: list[RouteOption]) -> list[RouteOption]:
+    kept: list[RouteOption] = []
+    for route in routes:
+        if len(route.coordinates) < 2:
+            continue
+        if any(share_fraction(route.coordinates, existing.coordinates) > 0.85 for existing in kept):
+            continue
+        kept.append(route)
+    return kept
+
+
+def lateral_vias(
+    coords: list[tuple[float, float]], fraction: float
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    cumulative = cumulative_miles(coords)
+    total = cumulative[-1]
+    (lon, lat), index = point_at(coords, cumulative, total * fraction)
+    prev = coords[max(0, index - 1)]
+    nxt = coords[min(len(coords) - 1, index if index > 0 else 1)]
+    heading = 0.0 if prev == nxt else bearing_deg(prev[0], prev[1], nxt[0], nxt[1])
+    offset = max(10.0, min(40.0, 0.12 * total))
+    left = destination(lon, lat, (heading - 90) % 360, offset)
+    right = destination(lon, lat, (heading + 90) % 360, offset)
+    return left, right, (lon, lat)
+
+
+def side_name(via: tuple[float, float], midpoint: tuple[float, float]) -> str:
+    dlon = via[0] - midpoint[0]
+    dlat = via[1] - midpoint[1]
+    if abs(dlon) >= abs(dlat):
+        return "east" if dlon >= 0 else "west"
+    return "north" if dlat >= 0 else "south"
+
+
+def _slug(label: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in label)
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-") or "route"
+
+
+def drop_long_detours(routes: list[RouteOption]) -> list[RouteOption]:
+    """Drop via options more than 40% longer than the best non-via route."""
+    if not routes:
+        return []
+    anchors = [route for route in routes if route.kind != "via"] or routes
+    best = min(route.distance_m for route in anchors)
+    if best <= 0:
+        return routes
+    return [
+        route
+        for route in routes
+        if route.kind != "via" or route.distance_m <= best * DETOUR_LIMIT
+    ]
+
+
+def assign_labels(routes: list[RouteOption]) -> list[RouteOption]:
+    if routes and all(route.kind == "alternative" for route in routes):
+        routes = sorted(routes, key=lambda route: (route.duration_s, route.distance_m))
+        names = ["Fastest", "Alternate", "Alternate 2"]
+        for index, route in enumerate(routes):
+            route.label = names[index] if index < len(names) else f"Alternate {index}"
+            route.id = _slug(route.label)
+        return routes
+
+    base = next((route for route in routes if route.kind == "direct"), routes[0])
+    cumulative = cumulative_miles(base.coordinates)
+    midpoint, _ = point_at(base.coordinates, cumulative, cumulative[-1] / 2)
+    used: set[str] = set()
+    for route in routes:
+        if route.kind == "via" and route.via is not None:
+            label = f"Via {side_name(route.via, midpoint)}"
+        elif route.kind == "shortest":
+            label = "Shortest distance"
+        elif route.kind == "direct":
+            label = "Direct"
+        else:
+            label = "Alternate"
+        unique = label
+        suffix = 2
+        while unique in used:
+            unique = f"{label} {suffix}"
+            suffix += 1
+        used.add(unique)
+        route.label = unique
+        route.id = _slug(unique)
+    return routes
+
+
+def line_route(
+    coordinates: list[tuple[float, float]],
+    *,
+    mph: float,
+    provider: str,
+    truck_profile: bool,
+    warnings: list[str],
+    kind: str,
+    via: tuple[float, float] | None = None,
+) -> RouteOption:
+    cumulative = cumulative_miles(coordinates)
+    steps: list[Step] = []
+    for index in range(len(coordinates) - 1):
+        miles = cumulative[index + 1] - cumulative[index]
+        steps.append(
+            Step(
+                distance_m=miles * 1609.344,
+                duration_s=(miles / mph) * 3600.0 if mph else 0.0,
+                start_index=index,
+                end_index=index + 1,
+            )
+        )
+    return RouteOption(
+        id="",
+        label="",
+        provider=provider,
+        truck_profile=truck_profile,
+        distance_m=cumulative[-1] * 1609.344,
+        duration_s=sum(step.duration_s for step in steps),
+        coordinates=coordinates,
+        steps=steps,
+        warnings=list(warnings),
+        kind=kind,
+        via=via,
+    )
+
+
+class FixtureProvider:
+    """Straight-line stand-in used when ORS_API_KEY is unset. Not a truck route."""
+
+    calls = 0
+
+    def routes(
+        self, origin: tuple[float, float], destination: tuple[float, float], load_lb: float
+    ) -> list[RouteOption]:
+        del load_lb
+        direct_coords = polyline_every(origin, destination, 5.0)
+        direct = line_route(
+            direct_coords,
+            mph=55,
+            provider="fixture",
+            truck_profile=False,
+            warnings=["routing_fixture"],
+            kind="direct",
+        )
+        left, right, _ = lateral_vias(direct_coords, 0.5)
+        routes = [direct]
+        for via, mph in ((left, 50.0), (right, 52.0)):
+            coords = polyline_every(origin, via, 5.0)[:-1] + polyline_every(via, destination, 5.0)
+            routes.append(
+                line_route(
+                    coords,
+                    mph=mph,
+                    provider="fixture",
+                    truck_profile=False,
+                    warnings=["routing_fixture"],
+                    kind="via",
+                    via=via,
+                )
+            )
+        return assign_labels(drop_long_detours(dedupe(routes)))
+
+
+class _HttpRoutes:
+    def __init__(self, client: httpx.Client | None = None) -> None:
+        self.client = client or httpx.Client(timeout=httpx.Timeout(20.0, connect=5.0))
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def _send(self, request: httpx.Request) -> httpx.Response:
+        response = None
+        last_error: Exception | None = None
+        for attempt in (1, 2):
+            with self._lock:
+                self.calls += 1
+            try:
+                response = self.client.send(request)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                logger.warning("routing request failed: %s", exc.__class__.__name__)
+                if attempt == 2:
+                    raise RoutingUnavailable("The routing provider did not respond.") from exc
+                time.sleep(0.2)
+                continue
+            if response.status_code in (429, 502, 503, 504) and attempt == 1:
+                time.sleep(0.2)
+                continue
+            return response
+        if response is not None:
+            return response
+        raise RoutingUnavailable("The routing provider did not respond.") from last_error
+
+
+class OrsProvider(_HttpRoutes):
+    def __init__(
+        self,
+        api_key: str,
+        client: httpx.Client | None = None,
+        base_url: str | None = None,
+        cache=None,
+    ) -> None:
+        super().__init__(client)
+        self.api_key = api_key
+        self.base_url = base_url
+        self.route_cache = cache
+        self.last_status: int | None = None
+
+    def routes(
+        self, origin: tuple[float, float], destination: tuple[float, float], load_lb: float
+    ) -> list[RouteOption]:
+        from app.route_cache import cache_key, load_routes, store_routes
+
+        key = cache_key(origin, destination, load_lb)
+        cached = load_routes(self.route_cache, key)
+        if cached:
+            return cached
+        routes, failed = self._collect(origin, destination, load_lb, restrictions=True)
+        relaxed = False
+        if not routes:
+            routes, failed = self._collect(origin, destination, load_lb, restrictions=False)
+            relaxed = True
+        routes = drop_long_detours(routes)
+        if not routes:
+            if failed or self.last_status:
+                status = self.last_status
+                message = (
+                    f"OpenRouteService returned HTTP {status}."
+                    if status
+                    else "OpenRouteService did not return a route."
+                )
+                raise RoutingUnavailable(message, status=status)
+            return []
+        if relaxed:
+            for route in routes:
+                route.truck_profile = False
+                if "weight_restriction_relaxed" not in route.warnings:
+                    route.warnings.append("weight_restriction_relaxed")
+        labeled = assign_labels(routes)
+        store_routes(self.route_cache, key, labeled)
+        return labeled
+
+    def _collect(self, origin, destination, load_lb, restrictions: bool):
+        miles = haversine(origin[0], origin[1], destination[0], destination[1])
+        failed = False
+        found: list[RouteOption] = []
+        if miles * KM_PER_MILE <= SHORT_HAUL_KM:
+            batch, ok = self._fetch(
+                [origin, destination],
+                load_lb,
+                alternatives=True,
+                restrictions=restrictions,
+                preference="recommended",
+                kind="alternative",
+            )
+            failed = failed or not ok
+            found.extend(batch)
+            found = dedupe(found)
+            if len(found) >= 3:
+                return found[:3], failed
+        direct, ok = self._fetch(
+            [origin, destination],
+            load_lb,
+            alternatives=False,
+            restrictions=restrictions,
+            preference="recommended",
+            kind="direct",
+        )
+        failed = failed or not ok
+        found = dedupe(found + direct)
+        if not found:
+            return [], failed
+        base = next((route for route in found if route.kind == "direct"), found[0])
+        best = base.distance_m
+        vias: list[tuple[float, float]] = []
+        for fraction in (0.3, 0.7, 0.5):
+            left, right, _mid = lateral_vias(base.coordinates, fraction)
+            vias.extend((left, right))
+        for offset in range(0, len(vias), 3):
+            if len(found) >= 3:
+                break
+            group = vias[offset : offset + 3]
+            for extra, ok in self._fetch_vias(origin, destination, load_lb, restrictions, group):
+                failed = failed or not ok
+                acceptable = [route for route in extra if route.distance_m <= best * DETOUR_LIMIT]
+                found = dedupe(found + acceptable)
+        if len(found) < 3:
+            extra, ok = self._fetch(
+                [origin, destination],
+                load_lb,
+                alternatives=False,
+                restrictions=restrictions,
+                preference="shortest",
+                kind="shortest",
+            )
+            failed = failed or not ok
+            found = dedupe(found + extra)
+        found = drop_long_detours(found)
+        return found[:3], failed
+
+    def _fetch_vias(self, origin, destination, load_lb, restrictions, vias):
+        jobs = []
+        with ThreadPoolExecutor(max_workers=min(3, len(vias))) as pool:
+            futures = [
+                pool.submit(
+                    self._fetch,
+                    [origin, via, destination],
+                    load_lb,
+                    alternatives=False,
+                    restrictions=restrictions,
+                    preference="recommended",
+                    kind="via",
+                    via=via,
+                )
+                for via in vias
+            ]
+            for future in futures:
+                jobs.append(future.result())
+        return jobs
+
+    def _fetch(
+        self,
+        coordinates,
+        load_lb,
+        *,
+        alternatives: bool,
+        restrictions: bool,
+        preference: str,
+        kind: str,
+        via: tuple[float, float] | None = None,
+        radiuses: list[float] | None = None,
+    ) -> tuple[list[RouteOption], bool]:
+        body = ors_body(
+            coordinates,
+            load_lb,
+            alternatives=alternatives,
+            restrictions=restrictions,
+            preference=preference,
+            radiuses=radiuses,
+        )
+        request = httpx.Request(
+            "POST",
+            ors_directions_url(self.base_url),
+            json=body,
+            headers={
+                "Authorization": self.api_key,
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            response = self._send(request)
+        except RoutingUnavailable:
+            return [], False
+        if ors_error_code(response) == 2010:
+            return self._handle_snap_miss(
+                response,
+                coordinates,
+                load_lb,
+                alternatives=alternatives,
+                restrictions=restrictions,
+                preference=preference,
+                kind=kind,
+                via=via,
+                radiuses=radiuses,
+            )
+        if response.status_code == 400:
+            self._log_ors(response)
+            return [], True
+        if response.status_code >= 400:
+            self._log_ors(response)
+            self.last_status = response.status_code
+            return [], False
+        routes = parse_ors(response.json(), truck_profile=restrictions)
+        for route in routes:
+            route.kind = kind
+            route.via = via
+        return routes, True
+
+    def _handle_snap_miss(
+        self,
+        response: httpx.Response,
+        coordinates,
+        load_lb: float,
+        *,
+        alternatives: bool,
+        restrictions: bool,
+        preference: str,
+        kind: str,
+        via: tuple[float, float] | None,
+        radiuses: list[float] | None,
+    ) -> tuple[list[RouteOption], bool]:
+        """2010 means the pin is off the road. Widen origin/destination; skip a via."""
+        if kind == "via" or len(coordinates) != 2:
+            return [], True
+        current = 0 if not radiuses else max(radiuses)
+        for radius in (2000, 5000):
+            if current >= radius:
+                continue
+            routes, ok = self._fetch(
+                coordinates,
+                load_lb,
+                alternatives=alternatives,
+                restrictions=restrictions,
+                preference=preference,
+                kind=kind,
+                via=via,
+                radiuses=[float(radius), float(radius)],
+            )
+            if routes or not ok:
+                return routes, ok
+        raise PointNotRoutable(snap_endpoint(response.text))
+
+    def _log_ors(self, response: httpx.Response) -> None:
+        body = response.text[:500].replace("\n", " ")
+        if self.api_key:
+            body = body.replace(self.api_key, "[redacted]")
+        logger.warning("ORS HTTP %s: %s", response.status_code, body)
+
+
+class OsrmProvider(_HttpRoutes):
+    def routes(
+        self, origin: tuple[float, float], destination: tuple[float, float], load_lb: float
+    ) -> list[RouteOption]:
+        del load_lb
+        found, ok = self._fetch([origin, destination], alternatives=True, kind="alternative")
+        if not ok and not found:
+            raise RoutingUnavailable("OSRM did not respond.")
+        found = dedupe(found)
+        if len(found) >= 3:
+            return assign_labels(found[:3])
+        direct, ok = self._fetch([origin, destination], alternatives=False, kind="direct")
+        if not ok and not found and not direct:
+            raise RoutingUnavailable("OSRM did not respond.")
+        found = dedupe(found + direct)
+        if not found:
+            return []
+        base = found[0]
+        left, right, _ = lateral_vias(base.coordinates, 0.5)
+        for via in (left, right):
+            extra, _ = self._fetch([origin, via, destination], alternatives=False, kind="via", via=via)
+            found = dedupe(found + extra)
+            if len(found) >= 3:
+                break
+        return assign_labels(found[:3])
+
+    def _fetch(self, coordinates, *, alternatives: bool, kind: str, via=None):
+        path = ";".join(f"{lon},{lat}" for lon, lat in coordinates)
+        request = httpx.Request(
+            "GET",
+            f"{OSRM_URL}/{path}",
+            params={
+                "alternatives": "true" if alternatives else "false",
+                "steps": "true",
+                "geometries": "geojson",
+                "overview": "full",
+            },
+            headers={"User-Agent": USER_AGENT},
+        )
+        try:
+            response = self._send(request)
+        except RoutingUnavailable:
+            return [], False
+        if response.status_code >= 400:
+            return [], response.status_code < 500
+        routes = parse_osrm(response.json())
+        for route in routes:
+            route.kind = kind
+            route.via = via
+        return routes, True
+
+
+def get_provider(cache=None) -> FixtureProvider | OrsProvider | OsrmProvider:
+    import os
+
+    choice = os.environ.get("ROUTING_PROVIDER", "").strip().lower()
+    key = os.environ.get("ORS_API_KEY", "").strip()
+    if choice == "osrm":
+        return OsrmProvider()
+    if choice == "fixture" or not key:
+        return FixtureProvider()
+    return OrsProvider(key, cache=cache)
