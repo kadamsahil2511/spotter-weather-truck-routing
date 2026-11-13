@@ -1,6 +1,6 @@
 # Plan: Weather-aware truck routing
 
-Planning only. Nothing in this document is application code. Review it, then build.
+Candidate review is folded in below. The build follows this document.
 
 Take-home for Spotter AI, Full Stack Developer. Due **15 Nov 2026, 10:20 PM IST**. Budget **16 hours**. Score is 40% route / weather / risk / recommendation, 40% UI / map / heatmap smoothness, 15% code quality, 5% docs and the Loom. Correctness and clarity beat extra features.
 
@@ -12,22 +12,22 @@ Take-home for Spotter AI, Full Stack Developer. Due **15 Nov 2026, 10:20 PM IST*
 | Three routes | Alternatives when the haul is ≤ 100 km; otherwise one direct route plus two via-point routes | Hosted ORS refuses `alternative_routes` above 100 km. A real haul needs another way to get three options. |
 | Provider swap | One `RouteProvider` interface. OSRM is the fallback implementation, not the default | The UI and the risk code never import a vendor. |
 | Weather | Open-Meteo forecast, no key | Free, hourly, multi-coordinate, mph and inch units. |
-| Wind number | **Gust** (`wind_gusts_10m`). Sustained is display-only | The load rules are about trucks staying upright. A 40 mph mean with a 55 mph gust is a no-travel hour. |
+| Wind number | **Sustained** `wind_speed_10m` in mph, for every wind and load rule. Gust is display-only | The brief says wind speed. Gust is shown on the checkpoint and never enters the classifier. |
 | Rain number | Open-Meteo `rain`, not `precipitation` | `precipitation` includes snow water-equivalent, so using it would count snow twice. |
 | Snow units | Read `hourly_units.snowfall`. If `cm`, divide by **2.54**. If `inch`, use it | Depth in inches, not the “divide by 7” water-equivalent note. |
 | Shared rain/snow edges | The worse class wins | 0.25 in/hr is High. 0.50 in/hr is Severe. 1.00 stays Severe (`> 1.00` is the no-travel test). |
 | Wind gaps | Next band’s lower bound is exclusive | 34.9 mph is Moderate. 35.0 is High. No gap, no overlap. |
 | Load edges | Strict `>` as written | 30,000 lb does **not** upgrade 45–54 mph. 40,000 lb does **not** upgrade 35–44 mph. |
-| Sort | No-travel miles, then the four written keys, then distance | A route with any no-travel miles must not beat a clean route that merely has more Severe miles. |
+| Sort | Exactly the brief: fewest Severe miles, then fewest High miles, then lowest average risk, then shortest travel time, then route `id` | No extra no-travel key and no distance key. No-travel miles stay in the summary and raise a visible warning. |
 | Map | MapLibre GL + OpenFreeMap `positron` | Vector, free, no key, gray basemap so risk colors stay readable. |
-| UI kit | Not chosen | Tailwind layout plus a handful of wrapper components. The kit replaces the wrappers later. |
+| UI kit | **HeroUI v3** (`@heroui/react` + `@heroui/styles`) on Tailwind v4 | Controls, cards, chips, slider, navbar, alerts, autocomplete, date and time, tabs, and the mobile drawer. Accent overridden from the default blue to terracotta. |
 | App shape | Installable PWA. Static UI on Vercel. Django on the existing VPS, port **8002** | Isolated from the `spotter` compose project on port 8001. |
 | Server state | None. No accounts, no database tables | Django still has a throwaway sqlite file because the framework requires `DATABASES`. |
 
-Two calls to confirm before writing the risk module, because they are easy to flip and expensive to half-change:
+Confirmed in review, and not open for reinterpretation:
 
-1. Gust, not sustained, is the wind input to every rule including the load rules.
-2. No-travel miles are a sort key **in front of** “fewest Severe miles”.
+1. Sustained `wind_speed_10m` is the only wind input, including the load rules. `wind_gusts_10m` is stored and shown.
+2. The sort is the brief’s four keys, then `id`. No-travel miles do not move a route up or down. A route with No Travel miles gets a warning the driver can see.
 
 ## Routing recommendation
 
@@ -185,7 +185,7 @@ frontend/
 
 Python 3.12. Django and DRF at whatever is the current stable on install day, pinned in `requirements.txt` with `django-cors-headers`, `gunicorn`, `httpx`, `redis`, `pytest`. No Celery, no Channels, no PostGIS.
 
-Frontend: Vite, React, TypeScript `strict`, Tailwind (v4 if the Vite plugin is the current stable). MapLibre from `maplibre-gl` plus its CSS. No UI kit in the first commit.
+Frontend: Vite, React, TypeScript `strict`, Tailwind v4, HeroUI v3, MapLibre. `ORS_API_KEY` is read from the environment and is never committed. With the key unset, the API serves a labeled straight-line fixture so the app and the tests run.
 
 ## API contract
 
@@ -248,7 +248,7 @@ The analyze form submits a picked row, not free text, so “Springfield” is un
     "tare_lb": 35000,
     "height_m": 4.0,
     "width_m": 2.6,
-    "wind_field": "gust"
+    "wind_field": "sustained"
   },
   "routes": [
     {
@@ -281,7 +281,7 @@ The analyze form submits a picked row, not free text, so “Springfield” is un
           "weather": {
             "wind_mph": 12.1,
             "gust_mph": 18.4,
-            "wind_used_mph": 18.4,
+            "wind_used_mph": 12.1,
             "rain_in_hr": 0.0,
             "snow_in_hr": 0.0,
             "matched": "exact"
@@ -302,7 +302,7 @@ The analyze form submits a picked row, not free text, so “Springfield” is un
     "route_id": "direct",
     "decided_by": "severe_mi",
     "confidence": "full",
-    "explanation": "No no-travel miles. 12.5 severe miles versus 30.0 on Via east."
+    "explanation": "Direct has 12.5 severe miles versus 30.0 on Via east."
   },
   "heatmap": {
     "anchor": "2026-11-16T12:00:00Z",
@@ -418,11 +418,11 @@ Timeouts: 10 seconds, one retry on 429 or 502, honor `Retry-After` when it is un
 
 Levels, worst last: `low < moderate < high < severe < no_travel`. `unknown` is outside the order and never wins a max.
 
-### Wind, mph, using the gust
+### Wind, sustained mph
 
-The brief’s bands are written as integers (`25–34`, `35–44`, `45–54`) with gaps between 34 and 35, 44 and 45, 54 and 55. Continuous rule: **lower bound inclusive, next band’s lower bound exclusive.**
+The brief’s bands are written as integers (`25–34`, `35–44`, `45–54`) with gaps between 34 and 35, 44 and 45, 54 and 55. Continuous rule: **lower bound inclusive, next band’s lower bound exclusive.** The number is `wind_speed_10m`. A higher gust does not change the class.
 
-| Gust mph | Level |
+| Sustained mph | Level |
 |---|---|
 | `< 25` | low |
 | `>= 25` and `< 35` | moderate |
@@ -489,19 +489,21 @@ Average risk is mile-weighted, not a mean of checkpoint counts:
 
 with low 1, moderate 2, high 3, severe 4, no_travel 5.
 
-Sort key, first difference wins:
+Sort key, first difference wins. This is the brief, in the brief’s order:
 
-1. Complete routes before incomplete routes.
-2. Fewest `no_travel_mi`. Added in front of the written list so a no-travel stretch cannot hide behind “zero severe”.
-3. Fewest `severe_mi`.
-4. Fewest `high_mi`.
-5. Lowest `avg_risk`.
-6. Shortest `duration_s`.
-7. Shortest provider `distance_mi`, then `id`, so the sort is stable.
+1. Fewest `severe_mi`.
+2. Fewest `high_mi`.
+3. Lowest `avg_risk`.
+4. Shortest `duration_s`.
+5. Route `id`, only so a full tie is stable.
 
-Compare miles after rounding to 0.1, so float noise is not a ranking. Display miles to one decimal. `decided_by` is the first key that actually separated the winner from the runner-up. The explanation names both numbers. `confidence` is `"full"`, or `"partial"` when the winner is incomplete because every route was incomplete and weather still exists for some segments. If there is no weather on any route, `recommendation` is null.
+No-travel miles are not a key. Distance is not a key. A route is not placed ahead of another because it is complete. The one unknown-data guard: a route with no classifiable miles (every segment `unknown`) is left out of the ranking when any other route has classifiable miles, because zeros from missing weather are not “fewest Severe miles”. If every route is in that state, `recommendation` is null and the lines still draw. A route that has some known miles and some unknown miles stays in the ranking and sorts by the known Severe and High miles. `incomplete` is a warning, not a sort key.
 
-Worked example, and a unit test:
+`no_travel_mi` is still on the summary. Any route with `no_travel_mi > 0` gets warning `no_travel`, and the page shows that warning on the route. The recommended route can be one of them.
+
+Compare miles after rounding to 0.1, so float noise is not a ranking. Display miles to one decimal. `decided_by` is the first brief key that separated the winner from the runner-up. The explanation names both numbers. `confidence` is `"partial"` when the winner has any unknown miles, otherwise `"full"`.
+
+Worked example, and a unit test. Order under the brief is **C, then A, then B**:
 
 | Route | No-travel mi | Severe mi | High mi | Avg | Duration |
 |---|---|---|---|---|---|
@@ -509,7 +511,7 @@ Worked example, and a unit test:
 | B | 0 | 10 | 8 | 1.2 | 4 h |
 | C | 2 | 0 | 0 | 1.1 | 3 h |
 
-Winner **A**. C is out on no-travel miles. A and B tie on severe; A wins on high miles even though B is faster and has a better average. The later keys do not get a vote.
+Winner **C**, on fewest Severe miles, even though it is the only route with No Travel miles. The page warns on C and does not reorder it. A ranks above B on High miles. B’s better average and shorter time do not get a vote.
 
 ## Heatmap
 
@@ -558,7 +560,7 @@ No web worker. Building 160 points is well under a millisecond. Revisit only if 
 
 Light, stone and off-white, one accent (terracotta). The basemap is positron, which is already gray. Risk colors are the only saturated colors on the page. No second accent, no blue links, no card nested in a card.
 
-Desktop: a 380px column (form, then route summaries, then the checkpoint list of the selected route) and the map filling the rest. Mobile: form, summaries, map at about 60vh, then the checkpoint list. The list is always in the DOM. The map canvas is not the accessible copy of the data.
+Mobile first. The form sits above a map of about 60vh. Results open in a HeroUI bottom drawer (a bottom sheet), with a button to reopen it. From the `md` breakpoint up, that same results block is a 380px side column and the map fills the rest. The list is in the DOM in one of those two places, not both. The map canvas is not the accessible copy of the data.
 
 ### State
 
@@ -578,11 +580,11 @@ Click a line to select that route. Click a circle to scroll its row into view. F
 
 ### Form
 
-Origin and destination typeahead, 300 ms debounce, must pick a row. Departure is `datetime-local`, defaulting to the next round hour, helper text “local time where you start”. Load is a number in pounds plus three chips: 20,000, 35,000, 45,000, so the Loom can hit both load rules without typing. Sample interval is a three-way control, default 25. Changing it submits again; the server rebuilds checkpoints. The heatmap grid does not depend on the interval, but one request is simpler than two endpoints.
+Origin and destination use HeroUI autocomplete, 300 ms debounce, and the request sends a picked row. Departure is a HeroUI date field plus a time field, defaulting to the next round hour, helper text “local time where you start”. Load is a HeroUI number field plus chips at 20,000, 35,000, and 45,000 lb. Sample interval is HeroUI tabs, default 25. Submit and install live in HeroUI buttons. Warnings use HeroUI alerts. The navbar holds the title and the install button.
 
-### Where a UI kit plugs in
+`:root` overrides `--accent` to terracotta and `--background` to off-white. The default HeroUI blue accent is not used.
 
-These are the only components allowed to know about a kit later: `Button`, `TextField`, `NumberField`, `ComboBox`, `Slider`, `SegmentedControl`, `Banner`. They take plain props (label, value, onChange, describedBy). `MapView`, the reducer, and the risk copy do not import the kit. Until one is chosen, each wrapper is a labeled native control styled with Tailwind. That satisfies the brief with zero extra dependency, and swapping in React Aria, Base UI, or Radix later is a change inside those files.
+Changing the interval submits again. The heatmap grid does not depend on the interval, but one request is simpler than two endpoints.
 
 ### Accessibility
 
@@ -726,9 +728,9 @@ Logic tests land before the map. If a phase slips, cut from the right-hand colum
 
 1. **45 s.** What the app decides, and the picture: browser on Vercel, Django on the VPS, ORS, Open-Meteo, MapLibre.
 2. **2 min.** Enter a haul, load 45,000 lb, interval 25. Three lines appear. Read the recommendation sentence and point at which key decided it.
-3. **90 s.** Open one checkpoint. Show the ETA, the gust, and the load rule that fired. Mention 30,000 and 40,000 are not inclusive.
+3. **90 s.** Open one checkpoint. Show the ETA, the sustained wind the rule used, the gust beside it, and the load rule if one fired. Mention 30,000 and 40,000 are not inclusive.
 4. **60 s.** Drag the 0–48 h slider. Say the frames were computed once on the server and the client is only swapping weights.
-5. **60 s.** The two judgment calls: gust rather than sustained, and no-travel miles sorted ahead of severe miles. One sentence each on why.
+5. **60 s.** The sort is the brief’s order. Point at a route that has No Travel miles and at the warning, and say those miles did not decide the rank.
 6. **45 s.** Install the PWA, reload offline, the last trip is still there.
 7. **60 s.** Point at `risk.py` and the boundary tests, then the provider interface. Do not tour the whole repo.
 8. **30 s.** What was left out on purpose: accounts, traffic, turn-by-turn, a second basemap.
