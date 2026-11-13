@@ -23,6 +23,8 @@ export function Results({
   origin = null,
   destination = null,
   showTimeline = true,
+  scope = "all",
+  onSteps,
 }: {
   result: AnalyzeResponse;
   selectedId: string | null;
@@ -31,9 +33,12 @@ export function Results({
   origin?: Place | null;
   destination?: Place | null;
   showTimeline?: boolean;
+  scope?: "all" | "selected";
+  onSteps?: () => void;
 }) {
   const recommendedId = result.recommendation?.route_id ?? null;
   const selected = result.routes.find((route) => route.id === selectedId) ?? result.routes[0];
+  const visible = scope === "selected" && selected ? [selected] : result.routes;
   useEffect(() => {
     if (!selected?.id) return;
     document.getElementById(`route-${selected.id}`)?.scrollIntoView?.({ block: "nearest" });
@@ -41,10 +46,9 @@ export function Results({
   return (
     <div className="flex flex-col gap-3">
       <div>
-        <h2 className="text-base font-semibold text-[#1C1917]" id="recommendation" tabIndex={-1}>
-          {result.recommendation ? "Recommended route" : "No recommendation"}
+        <h2 className="sr-only" id="recommendation" tabIndex={-1}>
+          {result.recommendation ? "Safest route" : "No recommendation"}
         </h2>
-        <p className="text-xs text-stone-500">Ranked: Severe mi, High mi, avg risk, time</p>
       </div>
       {result.recommendation ? (
         <p className="text-sm text-stone-700">{result.recommendation.explanation}</p>
@@ -85,7 +89,7 @@ export function Results({
         </Alert>
       )}
       <ul aria-label="Routes in API order" className="flex flex-col gap-2">
-        {result.routes.map((route) => (
+        {visible.map((route) => (
           <li key={route.id} data-route-id={route.id}>
             <RouteCard
               route={route}
@@ -94,7 +98,9 @@ export function Results({
               timeZone={timeZone}
               origin={origin}
               destination={destination}
+              showAverage={showTimeline}
               onSelect={onSelect}
+              onSteps={onSteps}
             />
             {route.warnings.includes("no_travel") && (
               <Alert className="mt-2" status="danger">
@@ -111,7 +117,12 @@ export function Results({
           </li>
         ))}
       </ul>
-      {showTimeline && selected && <CheckpointList route={selected} timeZone={timeZone} />}
+      {showTimeline && selected && (
+        <div>
+          <p className="mb-2 text-xs text-stone-500">Ranked: Severe mi, High mi, avg risk, time</p>
+          <CheckpointList route={selected} timeZone={timeZone} />
+        </div>
+      )}
     </div>
   );
 }
@@ -123,7 +134,9 @@ function RouteCard({
   timeZone,
   origin,
   destination,
+  showAverage,
   onSelect,
+  onSteps,
 }: {
   route: RouteResult;
   selected: boolean;
@@ -131,7 +144,9 @@ function RouteCard({
   timeZone: string;
   origin: Place | null;
   destination: Place | null;
+  showAverage: boolean;
   onSelect: (id: string) => void;
+  onSteps?: () => void;
 }) {
   const arrival = route.checkpoints.at(-1)?.eta;
   const href = googleMapsDirectionsUrl(route, origin, destination);
@@ -146,21 +161,24 @@ function RouteCard({
         onClick={() => onSelect(route.id)}
       >
         <div className="flex items-start justify-between gap-2">
-          <p className="font-semibold text-[#1C1917]">
-            {route.label}
-            {recommended ? " · Recommended" : ""}
+          <p className="text-[1.65rem] font-semibold leading-none tracking-tight text-[#1C1917]">
+            {formatDuration(route.duration_s)}
           </p>
           <RiskBadge level={worstSummaryLevel(route.summary)} />
         </div>
-        <p className="mt-1 text-sm text-stone-700">
-          {formatDuration(route.duration_s)} · {formatMiles(route.distance_mi)} mi
+        <p className="mt-2 text-sm font-medium text-[#1C1917]">
+          {route.label}
+          {recommended ? " · Safest route" : ""}
+        </p>
+        <p className="text-sm text-stone-600">
+          {formatMiles(route.distance_mi)} mi
           {arrival ? ` · arrive ${formatClock(arrival, timeZone)}` : ""}
         </p>
-        <RiskStrip checkpoints={route.checkpoints} distanceMi={route.distance_mi} large={selected} />
+        <RiskStrip checkpoints={route.checkpoints} distanceMi={route.distance_mi} large={selected && showAverage} />
         <p className="mt-1 text-xs text-stone-600">
           {formatMiles(route.summary.severe_mi)} Severe · {formatMiles(route.summary.high_mi)} High
           {route.summary.moderate_mi > 0.05 ? ` · ${formatMiles(route.summary.moderate_mi)} Moderate mi` : ""}
-          {route.summary.avg_risk != null ? ` · avg ${route.summary.avg_risk.toFixed(2)}` : ""}
+          {showAverage && route.summary.avg_risk != null ? ` · avg ${route.summary.avg_risk.toFixed(2)}` : ""}
         </p>
         {route.summary.no_travel_mi > 0.05 && (
           <span className="mt-2 inline-flex min-h-8 items-center rounded-full bg-[#2B1B2E] px-2.5 text-xs font-medium text-[#fafaf9]">
@@ -170,15 +188,23 @@ function RouteCard({
       </button>
       {selected && (
         <div className="px-3 pb-3">
+          <div className="flex gap-2">
           <a
-            className="button button--primary inline-flex h-11 w-full items-center justify-center"
+            className="button button--primary inline-flex h-11 flex-1 items-center justify-center"
             href={href}
             target="_blank"
             rel="noopener noreferrer"
             aria-describedby={caveatId}
+            aria-label="Start navigation"
           >
-            Start navigation
+            Start
           </a>
+          {onSteps && (
+            <button className="button button--secondary h-11 min-w-24" type="button" onClick={onSteps}>
+              Steps
+            </button>
+          )}
+          </div>
           <p className="mt-1 text-xs text-stone-500" id={caveatId}>
             {NAV_CAVEAT}
           </p>

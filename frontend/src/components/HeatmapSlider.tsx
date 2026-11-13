@@ -19,7 +19,7 @@ export function HeatmapSlider({
       ?.setAttribute("aria-valuetext", label);
   }, [label, hour]);
   return (
-    <div ref={rootRef} className="rounded-2xl bg-white/95 px-3 py-2 shadow-md">
+    <div ref={rootRef} className="rounded-full bg-white/90 px-3 py-1.5 shadow">
       <Slider
         aria-label="Forecast hour"
         className="w-full"
@@ -38,7 +38,7 @@ export function HeatmapSlider({
           <Slider.Thumb aria-valuetext={label} />
         </Slider.Track>
       </Slider>
-      {caption && <p className="mt-1 text-[11px] text-stone-500">{caption}</p>}
+      {caption && <p className="mt-0.5 text-[10px] leading-tight text-stone-500">{caption}</p>}
     </div>
   );
 }

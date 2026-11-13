@@ -33,6 +33,9 @@
 @import "@heroui/styles/components/skeleton.css" layer(components);
 @import "@heroui/styles/components/progress-bar.css" layer(components);
 @import "@heroui/styles/components/surface.css" layer(components);
+@import "@heroui/styles/components/disclosure.css" layer(components);
+@import "@heroui/styles/components/toggle-button.css" layer(components);
+@import "@heroui/styles/components/toggle-button-group.css" layer(components);
 
 :root,
 [data-theme="light"] {
@@ -71,9 +74,8 @@ body {
   font-family: inherit;
 }
 
-.maplibregl-map .maplibregl-ctrl-top-right {
-  top: var(--map-control-top, 0.75rem);
-  bottom: var(--map-control-bottom, auto);
+.maplibregl-map .maplibregl-ctrl-bottom-right {
+  bottom: var(--map-control-bottom, 1.25rem);
   right: max(0.5rem, env(safe-area-inset-right));
 }
 

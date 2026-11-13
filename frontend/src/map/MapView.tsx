@@ -82,6 +82,7 @@ export const MapView = memo(
         const current = resultRef.current;
         if (!map || !current || !map.getSource("heatmap")) return;
         (map.getSource("heatmap") as GeoJSONSource).setData(heatmapData(current, hour));
+        if (map.getLayer("heatmap")) map.setPaintProperty("heatmap", "heatmap-opacity", hour === 0 ? 0.12 : 0.72);
       },
     }));
 
@@ -91,11 +92,12 @@ export const MapView = memo(
       const map = new Map({
         container: node,
         style: "https://tiles.openfreemap.org/styles/positron",
-        center: [-96, 39],
-        zoom: 3.4,
+          center: [-97.5, 39.8],
+          zoom: 4.2,
         attributionControl: { compact: true },
       });
-      map.addControl(new NavigationControl({ showCompass: false }), "top-right");
+      map.addControl(new NavigationControl({ showCompass: false }), "bottom-right");
+      map.addControl(new LocateControl(), "bottom-right");
       map.on("load", () => {
         map.addSource("heatmap", { type: "geojson", data: EMPTY });
         map.addLayer({
@@ -106,7 +108,7 @@ export const MapView = memo(
             "heatmap-weight": ["get", "w"],
             "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 8, 1.4],
             "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 4, 14, 8, 36],
-            "heatmap-opacity": 0.85,
+              "heatmap-opacity": 0.12,
             "heatmap-color": [
               "interpolate",
               ["linear"],
@@ -146,7 +148,7 @@ export const MapView = memo(
           source: "routes-selected",
           filter: ["!=", ["get", "level"], "no_travel"],
           layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": "#ffffff", "line-width": 9 },
+          paint: { "line-color": "#1C1917", "line-width": 10 },
         });
         map.addLayer({
           id: "selected-nt-casing",
@@ -247,6 +249,42 @@ export const MapView = memo(
   }),
 );
 
+class LocateControl {
+  private container: HTMLDivElement | null = null;
+  private map: Map | null = null;
+
+  onAdd(map: Map) {
+    this.map = map;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "maplibregl-ctrl-icon";
+    button.setAttribute("aria-label", "My location");
+    button.textContent = "◎";
+    button.style.fontSize = "16px";
+    button.style.width = "29px";
+    button.style.height = "29px";
+    button.addEventListener("click", () => {
+      if (!navigator.geolocation) return;
+      navigator.geolocation.getCurrentPosition((position) => {
+        this.map?.flyTo({
+          center: [position.coords.longitude, position.coords.latitude],
+          zoom: Math.max(this.map.getZoom(), 10),
+        });
+      });
+    });
+    const container = document.createElement("div");
+    container.className = "maplibregl-ctrl maplibregl-ctrl-group";
+    container.append(button);
+    this.container = container;
+    return container;
+  }
+
+  onRemove() {
+    this.container?.remove();
+    this.map = null;
+  }
+}
+
 function clearMarkers(markers: Marker[]) {
   for (const marker of markers) marker.remove();
 }
@@ -275,9 +313,15 @@ function paint(
     selected.setData(EMPTY);
     hits.setData(EMPTY);
     dots.setData(EMPTY);
-    fitKeyRef.current = "";
+    const frame = `conus:${padding.top}:${padding.bottom}:${padding.left}:${padding.right}`;
+    if (fitKeyRef.current !== frame) {
+      fitKeyRef.current = frame;
+      const bounds = new LngLatBounds([-124.8, 24.4], [-66.9, 49.4]);
+      map.fitBounds(bounds, { padding, duration: 0, maxZoom: 5 });
+    }
     return;
   }
+  if (map.getLayer("heatmap")) map.setPaintProperty("heatmap", "heatmap-opacity", hour === 0 ? 0.12 : 0.72);
   const chosen = result.routes.find((route) => route.id === selectedId) ?? null;
   heatmap.setData(heatmapData(result, hour));
   others.setData(routeCollection(result.routes.filter((route) => route.id !== chosen?.id)));
@@ -310,7 +354,7 @@ function placeMarkers(map: Map, result: AnalyzeResponse, chosen: RouteResult | n
     if (route.geometry.length < 2) continue;
     const best = route.id === recommendedId;
     const noTravel = route.summary.no_travel_mi > 0.05;
-    const label = `${formatDurationCompact(route.duration_s)}${best ? " · Best" : ""}${noTravel ? " ⚠" : ""}`;
+    const label = `${formatDurationCompact(route.duration_s)}${best ? " · Safest" : ""}${noTravel ? " ⚠" : ""}`;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "route-bubble";

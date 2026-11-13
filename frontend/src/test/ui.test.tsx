@@ -22,7 +22,9 @@ describe("results", () => {
   it("shows the recommendation sentence and the no-travel warning", () => {
     render(<Results result={sampleResult} selectedId="direct" onSelect={() => undefined} />);
     expect(screen.getByText("direct has 0 severe miles versus 18 on via-east.")).toBeInTheDocument();
-    expect(screen.getByText(/2 h 0 min · 100 mi/)).toBeInTheDocument();
+    expect(screen.getByText("2 h 0 min")).toBeInTheDocument();
+    expect(screen.getAllByText(/100 mi/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Safest route/).length).toBeGreaterThan(0);
     expect(screen.getByText(/No Travel miles on Direct/)).toBeInTheDocument();
     expect(screen.getByText(/still follows the brief/)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: "Start navigation" });
@@ -51,9 +53,9 @@ describe("results", () => {
     render(<Results result={result} selectedId="via-east" onSelect={() => undefined} showTimeline={false} />);
     const items = screen.getAllByRole("listitem");
     expect(items.map((item) => item.getAttribute("data-route-id"))).toEqual(["via-west", "direct", "via-east"]);
-    expect(screen.getByRole("button", { name: /Via east/ })).toHaveTextContent("Recommended");
+    expect(screen.getByRole("button", { name: /Via east/ })).toHaveTextContent("Safest route");
     expect(screen.getByRole("button", { name: /Via east/ })).toHaveTextContent("Moderate");
-    expect(screen.getByRole("button", { name: /Via west/ })).not.toHaveTextContent("Recommended");
+    expect(screen.getByRole("button", { name: /Via west/ })).not.toHaveTextContent("Safest");
     expect(screen.getByRole("button", { name: /Via west/ })).toHaveTextContent("Severe");
     expect(screen.getByRole("button", { name: /Direct/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /Direct/ })).toHaveAttribute("aria-pressed", "false");

@@ -193,10 +193,11 @@ export function App() {
   const showSheet = !desktop && (state.status === "loading" || state.status === "error" || Boolean(state.result));
   const padding = useMemo<MapPadding>(() => {
     if (desktop) return { top: 56, right: 56, bottom: 96, left: 400 };
+    const formTop = typeof window !== "undefined" ? Math.round(window.innerHeight * 0.46) : 360;
     return {
-      top: collapsed ? 88 : 200,
+      top: collapsed ? 88 : formTop,
       right: 28,
-      bottom: snap === "half" ? 460 : snap === "full" ? 160 : 360,
+      bottom: snap === "half" ? 460 : snap === "full" ? 160 : 280,
       left: 28,
     };
   }, [desktop, collapsed, snap]);
@@ -218,8 +219,10 @@ export function App() {
           timeZone={timeZone}
           origin={trip?.origin ?? null}
           destination={trip?.destination ?? null}
+          scope={!desktop && snap === "peek" ? "selected" : "all"}
           showTimeline={desktop || snap === "full"}
           onSelect={onSelect}
+          onSteps={desktop ? undefined : () => setSnap("full")}
         />
       )}
       <p className="text-[11px] leading-4 text-stone-500">Sustained wind is scored. Gusts are shown and not scored.</p>
@@ -238,8 +241,13 @@ export function App() {
     <div
       className="relative h-dvh overflow-hidden bg-[#fafaf9]"
         style={{
-          ["--map-control-top" as string]: desktop ? "0.75rem" : collapsed ? "4.75rem" : "auto",
-          ["--map-control-bottom" as string]: !desktop && !collapsed ? "5.5rem" : "auto",
+          ["--map-control-bottom" as string]: desktop
+            ? "1.25rem"
+            : state.result && snap === "half"
+              ? "calc(62dvh + 8px)"
+              : state.result && snap === "peek"
+                ? "calc(min(400px, 48dvh) + 8px)"
+                : "5.5rem",
         }}
     >
       <div className="absolute inset-0">
@@ -297,7 +305,7 @@ export function App() {
               </>
             ) : (
               <Surface
-                className="flex max-h-[78dvh] flex-col overflow-hidden rounded-2xl bg-white p-4 shadow-xl"
+                className="flex max-h-[58dvh] flex-col overflow-hidden rounded-2xl bg-white p-4 shadow-xl"
                 variant="default"
               >
                 <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
