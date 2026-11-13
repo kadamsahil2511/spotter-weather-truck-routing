@@ -2,6 +2,7 @@ import { Alert, Button, Drawer, ProgressBar, Skeleton, Surface, useOverlayState 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { analyze } from "./api";
+import { ANALYZE_TIMEOUT_MESSAGE, ANALYZE_TIMEOUT_MS, loadingStage } from "./loading";
 import { HeatmapSlider } from "./components/HeatmapSlider";
 import { InstallButton } from "./components/InstallButton";
 import { OfflineNotice } from "./components/OfflineNotice";
@@ -79,6 +80,7 @@ export function App() {
   const [trip, setTrip] = useState<TripValues | null>(null);
   const [editing, setEditing] = useState(false);
   const [snap, setSnap] = useState<SheetSnap>("peek");
+  const [loadingNote, setLoadingNote] = useState("Finding truck routes…");
   const desktop = useDesktop();
   const editDrawer = useOverlayState();
   const mapRef = useRef<MapHandle>(null);
@@ -101,6 +103,14 @@ export function App() {
 
   useEffect(() => {
     if (state.status === "loading" || state.status === "error") setSnap("peek");
+  }, [state.status]);
+
+  useEffect(() => {
+    if (state.status !== "loading") return;
+    const started = Date.now();
+    setLoadingNote(loadingStage(0));
+    const timer = window.setInterval(() => setLoadingNote(loadingStage(Date.now() - started)), 400);
+    return () => window.clearInterval(timer);
   }, [state.status]);
 
   useEffect(() => {
@@ -127,6 +137,12 @@ export function App() {
     }
     const id = ++requestId.current;
     const controller = new AbortController();
+    const timedOut = window.setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS);
+    let abortedByTimeout = false;
+    const onAbort = () => {
+      abortedByTimeout = true;
+    };
+    controller.signal.addEventListener("abort", onAbort);
     dispatch({ type: "loading" });
     try {
       const result = await analyze(
@@ -144,7 +160,10 @@ export function App() {
       void saveLastResult(result);
     } catch (error) {
       if (id !== requestId.current) return;
-      if ((error as { name?: string }).name === "AbortError") return;
+      if ((error as { name?: string }).name === "AbortError") {
+        if (abortedByTimeout) dispatch({ type: "error", message: ANALYZE_TIMEOUT_MESSAGE });
+        return;
+      }
       const saved = await loadLastResult().catch(() => undefined);
       if (saved && !navigator.onLine) {
         dispatch({ type: "cached", result: saved });
@@ -154,6 +173,9 @@ export function App() {
         type: "error",
         message: error instanceof Error ? error.message : "The trip could not be analyzed.",
       });
+    } finally {
+      window.clearTimeout(timedOut);
+      controller.signal.removeEventListener("abort", onAbort);
     }
   }
 
@@ -182,7 +204,12 @@ export function App() {
   const body = (
     <div ref={focusRef} className="flex flex-col gap-3">
       {state.offline && <OfflineNotice />}
-      {state.status === "loading" && <RouteSkeletons />}
+      {state.status === "loading" && (
+        <>
+          <p className="text-sm font-medium text-[#1C1917]">{loadingNote}</p>
+          <RouteSkeletons />
+        </>
+      )}
       {state.status === "error" && state.error && <TripError message={state.error} onRetry={retry} />}
       {state.status !== "loading" && state.result && (
         <Results
@@ -220,7 +247,7 @@ export function App() {
       </div>
       {state.status === "loading" && (
         <div className="pointer-events-none absolute inset-x-0 top-0 z-30">
-          <ProgressBar aria-label="Checking routes" isIndeterminate className="w-full" size="sm">
+          <ProgressBar aria-label={loadingNote} isIndeterminate className="w-full" size="sm">
             <ProgressBar.Track>
               <ProgressBar.Fill />
             </ProgressBar.Track>

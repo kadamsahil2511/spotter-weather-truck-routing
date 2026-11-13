@@ -113,7 +113,81 @@ def min_distance_to_line(lon: float, lat: float, coords: list[tuple[float, float
     best = float("inf")
     for start, end in zip(coords, coords[1:]):
         best = min(best, distance_to_segment(lon, lat, start, end))
+        if best <= 1.0:
+            return best
     return best
+
+
+# About 1.4 miles of latitude. Overlap checks only need a yes/no inside 1 mile.
+_CELL_DEG = 0.02
+
+
+def _cell(lon: float, lat: float) -> tuple[int, int]:
+    return (math.floor(lon / _CELL_DEG), math.floor(lat / _CELL_DEG))
+
+
+def _search_pad(lat: float, limit_mi: float) -> int:
+    """How many cells to search so a segment within `limit_mi` cannot be missed."""
+    lat_mi = _CELL_DEG * 69.0
+    lon_mi = lat_mi * max(0.2, math.cos(math.radians(lat)))
+    return int(math.ceil(limit_mi / min(lat_mi, lon_mi))) + 1
+
+
+class LineIndex:
+    """Segment grid for 'is this point within 1 mile of the line?'.
+
+    The answer matches a full scan. Long segments are walked into every cell
+    they cross, and the query pad covers the 1-mile neighborhood.
+    """
+
+    def __init__(self, coords: list[tuple[float, float]]) -> None:
+        self.coords = coords
+        self.buckets: dict[tuple[int, int], list[int]] = {}
+        for index, (start, end) in enumerate(zip(coords, coords[1:])):
+            for cell in _cells_along(start, end):
+                self.buckets.setdefault(cell, []).append(index)
+
+    def within(self, lon: float, lat: float, limit_mi: float = 1.0) -> bool:
+        if len(self.coords) < 2:
+            return False
+        center = _cell(lon, lat)
+        pad = _search_pad(lat, limit_mi)
+        seen: set[int] = set()
+        for dx in range(-pad, pad + 1):
+            for dy in range(-pad, pad + 1):
+                for index in self.buckets.get((center[0] + dx, center[1] + dy), ()):
+                    if index in seen:
+                        continue
+                    seen.add(index)
+                    if distance_to_segment(lon, lat, self.coords[index], self.coords[index + 1]) <= limit_mi:
+                        return True
+        return False
+
+
+def _cells_along(start: tuple[float, float], end: tuple[float, float]) -> set[tuple[int, int]]:
+    cells = {_cell(start[0], start[1]), _cell(end[0], end[1])}
+    span = max(abs(end[0] - start[0]), abs(end[1] - start[1]))
+    steps = max(1, int(span / (_CELL_DEG * 0.5)))
+    for step in range(1, steps):
+        frac = step / steps
+        cells.add(_cell(start[0] + frac * (end[0] - start[0]), start[1] + frac * (end[1] - start[1])))
+    return cells
+
+
+def resample_miles(coords: list[tuple[float, float]], step_mi: float = 1.0) -> list[tuple[float, float]]:
+    """Keep a point about every `step_mi`, plus the ends. Used before overlap checks."""
+    if len(coords) < 3:
+        return list(coords)
+    cumulative = cumulative_miles(coords)
+    total = cumulative[-1]
+    if total <= step_mi:
+        return [coords[0], coords[-1]]
+    kept: list[tuple[float, float]] = []
+    for target in sample_targets(total, step_mi):
+        point, _index = point_at(coords, cumulative, target)
+        if not kept or abs(point[0] - kept[-1][0]) > 1e-9 or abs(point[1] - kept[-1][1]) > 1e-9:
+            kept.append(point)
+    return kept
 
 
 def douglas_peucker(

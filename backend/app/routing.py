@@ -13,13 +13,14 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.geo import (
+    LineIndex,
     bearing_deg,
     cumulative_miles,
     destination,
     haversine,
-    min_distance_to_line,
     point_at,
     polyline_every,
+    resample_miles,
 )
 
 logger = logging.getLogger(__name__)
@@ -249,24 +250,81 @@ def parse_osrm(payload: dict) -> list[RouteOption]:
     return routes
 
 
-def share_fraction(coords: list[tuple[float, float]], other: list[tuple[float, float]]) -> float:
-    cumulative = cumulative_miles(coords)
+# id(list) is only safe while that list object is still referenced. The cache
+# holds the list so a recycled id cannot point at a different polyline.
+_index_cache: dict[int, tuple[list[tuple[float, float]], LineIndex]] = {}
+_share_cache: dict[tuple[int, int], tuple[list[tuple[float, float]], list[tuple[float, float]], float]] = {}
+_cache_lock = threading.Lock()
+
+
+def _index_for(coords: list[tuple[float, float]]) -> LineIndex:
+    key = id(coords)
+    with _cache_lock:
+        found = _index_cache.get(key)
+        if found is not None and found[0] is coords:
+            return found[1]
+        if len(_index_cache) > 24:
+            _index_cache.clear()
+    # ~1 mile skeleton, then a cell index. A corner can move by less than a
+    # mile, which does not change the 1-mile / 85% keep-or-drop decision.
+    simplified = resample_miles(coords, 1.0)
+    if len(simplified) < 2:
+        simplified = list(coords)
+    index = LineIndex(simplified)
+    with _cache_lock:
+        _index_cache[key] = (coords, index)
+    return index
+
+
+def _sample_miles(cumulative: list[float], step: float) -> list[float]:
     total = cumulative[-1]
-    if total <= 1e-6 or len(other) < 2:
-        return 1.0
-    miles = []
+    miles: list[float] = []
     cursor = 0.0
     while cursor <= total + 1e-9:
         miles.append(min(cursor, total))
-        cursor += 5.0
+        cursor += step
         if miles[-1] >= total:
             break
-    near = 0
-    for mile in miles:
-        (lon, lat), _ = point_at(coords, cumulative, mile)
-        if min_distance_to_line(lon, lat, other) <= 1.0:
-            near += 1
-    return near / len(miles)
+    return miles
+
+
+def share_fraction(coords: list[tuple[float, float]], other: list[tuple[float, float]]) -> float:
+    """Fraction of 5-mile samples that sit within 1 mile of `other`.
+
+    Pair results are memoized, and each line is indexed once, so dedupe can
+    run again after every via without rewalking the raw ORS vertices.
+    """
+    pair = (id(coords), id(other))
+    with _cache_lock:
+        cached = _share_cache.get(pair)
+        if cached is not None and cached[0] is coords and cached[1] is other:
+            return cached[2]
+    cumulative = cumulative_miles(coords)
+    total = cumulative[-1] if cumulative else 0.0
+    if total <= 1e-6 or len(other) < 2:
+        result = 1.0
+    else:
+        index = _index_for(other)
+        near = 0
+        samples = _sample_miles(cumulative, 5.0)
+        cursor = 0
+        for mile in samples:
+            while cursor < len(cumulative) - 1 and cumulative[cursor + 1] + 1e-9 < mile:
+                cursor += 1
+            span = cumulative[cursor + 1] - cumulative[cursor] if cursor < len(cumulative) - 1 else 0.0
+            frac = 0.0 if span <= 1e-12 else (mile - cumulative[cursor]) / span
+            start = coords[cursor]
+            end = coords[min(cursor + 1, len(coords) - 1)]
+            lon = start[0] + frac * (end[0] - start[0])
+            lat = start[1] + frac * (end[1] - start[1])
+            if index.within(lon, lat, 1.0):
+                near += 1
+        result = near / len(samples)
+    with _cache_lock:
+        if len(_share_cache) > 256:
+            _share_cache.clear()
+        _share_cache[(id(coords), id(other))] = (coords, other, result)
+    return result
 
 
 def dedupe(routes: list[RouteOption]) -> list[RouteOption]:
@@ -462,15 +520,28 @@ class _HttpRoutes:
 
 
 class OrsProvider(_HttpRoutes):
-    def __init__(self, api_key: str, client: httpx.Client | None = None, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        client: httpx.Client | None = None,
+        base_url: str | None = None,
+        cache=None,
+    ) -> None:
         super().__init__(client)
         self.api_key = api_key
         self.base_url = base_url
+        self.route_cache = cache
         self.last_status: int | None = None
 
     def routes(
         self, origin: tuple[float, float], destination: tuple[float, float], load_lb: float
     ) -> list[RouteOption]:
+        from app.route_cache import cache_key, load_routes, store_routes
+
+        key = cache_key(origin, destination, load_lb)
+        cached = load_routes(self.route_cache, key)
+        if cached:
+            return cached
         routes, failed = self._collect(origin, destination, load_lb, restrictions=True)
         relaxed = False
         if not routes:
@@ -492,7 +563,9 @@ class OrsProvider(_HttpRoutes):
                 route.truck_profile = False
                 if "weight_restriction_relaxed" not in route.warnings:
                     route.warnings.append("weight_restriction_relaxed")
-        return assign_labels(routes)
+        labeled = assign_labels(routes)
+        store_routes(self.route_cache, key, labeled)
+        return labeled
 
     def _collect(self, origin, destination, load_lb, restrictions: bool):
         miles = haversine(origin[0], origin[1], destination[0], destination[1])
@@ -724,7 +797,7 @@ class OsrmProvider(_HttpRoutes):
         return routes, True
 
 
-def get_provider() -> FixtureProvider | OrsProvider | OsrmProvider:
+def get_provider(cache=None) -> FixtureProvider | OrsProvider | OsrmProvider:
     import os
 
     choice = os.environ.get("ROUTING_PROVIDER", "").strip().lower()
@@ -733,4 +806,4 @@ def get_provider() -> FixtureProvider | OrsProvider | OsrmProvider:
         return OsrmProvider()
     if choice == "fixture" or not key:
         return FixtureProvider()
-    return OrsProvider(key)
+    return OrsProvider(key, cache=cache)

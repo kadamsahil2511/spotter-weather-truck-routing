@@ -47,7 +47,7 @@ class AnalyzeView(APIView):
         try:
             from django.core.cache import cache
 
-            payload = run(request.data, get_provider(), OpenMeteoClient(cache=cache))
+            payload = run(request.data, get_provider(cache), OpenMeteoClient(cache=cache))
         except AnalyzeError as exc:
             return _error(exc.code, exc.message, exc.status, exc.upstream_status)
         return Response(payload)

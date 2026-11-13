@@ -1,10 +1,11 @@
 import json
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 
-from app.geo import haversine
+from app.geo import cumulative_miles, haversine, min_distance_to_line, point_at
 from app.routing import (
     FixtureProvider,
     OrsProvider,
@@ -102,6 +103,81 @@ def test_share_fraction_flags_the_same_line_and_keeps_a_shifted_one():
     assert share_fraction(line, line) == pytest.approx(1)
     shifted = [(-89.7, 40.0), (-89.7, 40.5), (-89.7, 41.0)]
     assert share_fraction(line, shifted) < 0.5
+
+
+def _slow_share(coords, other) -> float:
+    """The pre-index scan, kept here so the fast path has to make the same call."""
+    cumulative = cumulative_miles(coords)
+    total = cumulative[-1]
+    if total <= 1e-6 or len(other) < 2:
+        return 1.0
+    miles = []
+    cursor = 0.0
+    while cursor <= total + 1e-9:
+        miles.append(min(cursor, total))
+        cursor += 5.0
+        if miles[-1] >= total:
+            break
+    near = 0
+    for mile in miles:
+        lon, lat = point_at(coords, cumulative, mile)[0]
+        if min_distance_to_line(lon, lat, other) <= 1.0:
+            near += 1
+    return near / len(miles)
+
+
+def _wavy(count: int, lat_shift: float = 0.0) -> list[tuple[float, float]]:
+    import math
+
+    # East-west, so a latitude shift is a real lateral offset.
+    return [
+        (-90.0 + 2.0 * index / (count - 1), 40.0 + lat_shift + 0.004 * math.sin(index / 3.0))
+        for index in range(count)
+    ]
+
+
+def test_fast_share_matches_the_full_scan_on_a_wavy_road():
+    road = _wavy(400)
+    same = _wavy(400, 0.002)
+    other = _wavy(400, 0.08)
+    assert share_fraction(road, same) == pytest.approx(_slow_share(road, same), abs=0.02)
+    assert share_fraction(road, other) == pytest.approx(_slow_share(road, other), abs=0.02)
+    assert share_fraction(road, same) > 0.85
+    assert share_fraction(road, other) < 0.5
+
+
+def test_dedupe_drops_a_copy_and_keeps_a_shifted_corridor():
+    road = _wavy(180)
+    copy = [(lon, lat + 0.002) for lon, lat in road]
+    shifted = [(lon, lat + 0.08) for lon, lat in road]
+    routes = [
+        line_route(road, mph=55, provider="ors", truck_profile=True, warnings=[], kind="direct"),
+        line_route(copy, mph=55, provider="ors", truck_profile=True, warnings=[], kind="via", via=copy[len(copy) // 2]),
+        line_route(shifted, mph=50, provider="ors", truck_profile=True, warnings=[], kind="via", via=shifted[len(shifted) // 2]),
+    ]
+    routes[0].id = "direct"
+    routes[1].id = "copy"
+    routes[2].id = "shifted"
+    from app.routing import dedupe
+
+    kept = [route.id for route in dedupe(routes)]
+    assert kept == ["direct", "shifted"]
+    assert [route.id for route in dedupe(routes)] == kept
+
+
+def test_share_fraction_20k_point_pair_is_under_a_second():
+    import math
+
+    count = 20_000
+    line = [(-112.0 + 38.0 * index / (count - 1), 40.6 + 0.01 * math.sin(index / 40.0)) for index in range(count)]
+    shifted = [(lon, lat + 0.05) for lon, lat in line]
+    started = time.perf_counter()
+    same = share_fraction(line, line)
+    away = share_fraction(line, shifted)
+    elapsed = time.perf_counter() - started
+    assert same == pytest.approx(1)
+    assert away < 0.5
+    assert elapsed < 1.0
 
 
 def test_fixture_returns_three_labeled_routes_without_a_key():
