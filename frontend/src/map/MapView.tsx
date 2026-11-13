@@ -122,6 +122,7 @@ export const MapView = memo(
         map.easeTo({
           center: [lon, lat],
           bearing: bearing ?? 0,
+          padding: followCameraPadding(map),
           duration: reduce ? 0 : 400,
         });
       },
@@ -292,6 +293,31 @@ export const MapView = memo(
     return <div ref={containerRef} className="map-shell h-full w-full" />;
   }),
 );
+
+function followCameraPadding(map: Map) {
+  const height = map.getContainer().clientHeight;
+  const width = map.getContainer().clientWidth;
+  const desktop = window.matchMedia("(min-width: 768px)").matches;
+  let top = 90;
+  let bottom = 90;
+  let left = 24;
+  let right = 24;
+  if (desktop) {
+    left = 380;
+  } else {
+    const sheet = document.querySelector(".route-sheet");
+    const measured = sheet?.getBoundingClientRect().height ?? 0;
+    bottom = measured > 80 ? measured : Math.min(420, Math.round(height * 0.48));
+    top = 156;
+  }
+  const maxHeight = Math.max(0, height - 32);
+  const maxWidth = Math.max(0, width - 32);
+  top = Math.min(Math.max(0, top), Math.floor(maxHeight * 0.45));
+  bottom = Math.min(Math.max(0, bottom), maxHeight - top);
+  left = Math.min(Math.max(0, left), Math.floor(maxWidth * 0.55));
+  right = Math.min(Math.max(0, right), maxWidth - left);
+  return { top, bottom, left, right };
+}
 
 class LocateControl {
   private container: HTMLDivElement | null = null;

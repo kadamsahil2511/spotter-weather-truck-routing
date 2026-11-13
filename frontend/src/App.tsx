@@ -95,7 +95,7 @@ export function App() {
   const [loadingNote, setLoadingNote] = useState("Finding truck routes…");
   const [following, setFollowing] = useState(false);
   const [headingUp, setHeadingUp] = useState(false);
-  const [followNote, setFollowNote] = useState<string | null>(null);
+  const [followNote, setFollowNote] = useState<string[] | null>(null);
   const [suggestion, setSuggestion] = useState<{ routeId: string; message: string } | null>(null);
   const [followError, setFollowError] = useState<string | null>(null);
   const simulate = useMemo(() => new URLSearchParams(window.location.search).get("simulate") === "1", []);
@@ -156,13 +156,16 @@ export function App() {
       mapRef.current?.setPuck({ lon: progress.snapped[0], lat: progress.snapped[1], bearing });
       mapRef.current?.followFrame(progress.snapped[0], progress.snapped[1], bearing);
       if (isOffRoute(progress.distanceMi)) {
-        setFollowNote("Off route");
+        setFollowNote(["Off route"]);
         return;
       }
       const risk = nextRiskAhead(route.checkpoints, progress.mile);
       const left = remainingEta(route, progress.mile);
-      const remain = `${formatMiles(left.miles)} mi left · ${formatDuration(left.seconds)}`;
-      setFollowNote(risk ? `${risk.text} · ${remain}` : remain);
+      setFollowNote(
+        [risk?.text, `${formatMiles(left.miles)} mi left`, formatDuration(left.seconds)].filter(
+          (part): part is string => Boolean(part),
+        ),
+      );
     };
     let watchId = 0;
     let timer = 0;
@@ -500,9 +503,14 @@ export function App() {
             <p className="max-w-md rounded-2xl bg-white px-4 py-2 text-sm text-[#1C1917] shadow-md">{followError}</p>
           )}
           {followNote && (
-            <div className="flex max-w-lg items-center gap-2 rounded-full bg-[#1C1917] px-4 py-2 text-sm text-[#fafaf9] shadow-md">
-              <span>{followNote}</span>
-              {followNote === "Off route" && (
+            <div className="flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center justify-center gap-x-1.5 gap-y-1 rounded-full bg-[#1C1917] px-4 py-2 text-sm text-[#fafaf9] shadow-md">
+              {followNote.map((part, index) => (
+                <span className="whitespace-nowrap" key={part}>
+                  {index > 0 ? "· " : ""}
+                  {part}
+                </span>
+              ))}
+              {followNote[0] === "Off route" && (
                 <button
                   className="rounded-full bg-white px-3 py-1 text-xs font-medium text-[#1C1917]"
                   type="button"
@@ -515,7 +523,7 @@ export function App() {
                 </button>
               )}
               <button
-                className="rounded-full border border-white/40 px-3 py-1 text-xs"
+                className="whitespace-nowrap rounded-full border border-white/40 px-3 py-1 text-xs"
                 type="button"
                 onClick={() => setHeadingUp((current) => !current)}
               >
