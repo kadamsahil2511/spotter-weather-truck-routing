@@ -1,15 +1,18 @@
-import { Alert, Button, Drawer, Header, useOverlayState } from "@heroui/react";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { Alert, Button, Drawer, ProgressBar, Skeleton, Surface, useOverlayState } from "@heroui/react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { analyze } from "./api";
 import { HeatmapSlider } from "./components/HeatmapSlider";
-import { OfflineNotice } from "./components/OfflineNotice";
 import { InstallButton } from "./components/InstallButton";
+import { OfflineNotice } from "./components/OfflineNotice";
 import { Results } from "./components/Results";
+import { RiskLegend } from "./components/RiskLegend";
+import { RouteSheet, type SheetSnap } from "./components/RouteSheet";
+import { TripBar } from "./components/TripBar";
 import { TripForm, departureStamp, type TripValues } from "./components/TripForm";
+import { HEATMAP_CAPTION, forecastLabel, formatTripSummary } from "./format";
 import { LazyMap } from "./map/LazyMap";
-import type { MapHandle } from "./map/MapView";
-import { hourLabel } from "./format";
+import type { MapHandle, MapPadding } from "./map/MapView";
 import { loadLastResult, saveLastResult } from "./pwa/lastResult";
 import type { AnalyzeResponse } from "./types";
 
@@ -73,11 +76,15 @@ function reducer(state: State, action: Action): State {
 export function App() {
   const [state, dispatch] = useReducer(reducer, initial);
   const [hour, setHour] = useState(0);
+  const [trip, setTrip] = useState<TripValues | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [snap, setSnap] = useState<SheetSnap>("peek");
   const desktop = useDesktop();
-  const drawer = useOverlayState({});
+  const editDrawer = useOverlayState();
   const mapRef = useRef<MapHandle>(null);
   const requestId = useRef(0);
   const focusRef = useRef<HTMLDivElement>(null);
+  const onSelect = useCallback((id: string) => dispatch({ type: "select", id }), []);
 
   useEffect(() => {
     if (navigator.onLine) return;
@@ -92,16 +99,17 @@ export function App() {
     return () => window.removeEventListener("online", onOnline);
   }, []);
 
-  const drawerRef = useRef(drawer);
-  drawerRef.current = drawer;
+  useEffect(() => {
+    if (state.status === "loading" || state.status === "error") setSnap("peek");
+  }, [state.status]);
 
   useEffect(() => {
     if (state.status !== "ready" || !state.result) return;
     setHour(0);
+    setSnap("peek");
     mapRef.current?.setHour(0);
-    if (!desktop) drawerRef.current.open();
     focusRef.current?.querySelector<HTMLElement>("#recommendation")?.focus();
-  }, [state.result, state.status, desktop]);
+  }, [state.result, state.status]);
 
   function changeHour(next: number) {
     setHour(next);
@@ -109,11 +117,14 @@ export function App() {
   }
 
   async function onSubmit(values: TripValues) {
+    if (!values.origin || !values.destination) return;
+    setTrip(values);
+    setEditing(false);
+    editDrawer.close();
     if (!navigator.onLine) {
       dispatch({ type: "error", message: "You are offline. The last trip stays on the map." });
       return;
     }
-    if (!values.origin || !values.destination) return;
     const id = ++requestId.current;
     const controller = new AbortController();
     dispatch({ type: "loading" });
@@ -146,76 +157,216 @@ export function App() {
     }
   }
 
-  const label = state.result ? hourLabel(state.result.heatmap.anchor, hour) : "T+0h";
-  const results = state.result ? (
-    <div ref={focusRef}>
+  function retry() {
+    if (trip) void onSubmit(trip);
+  }
+
+  const timeZone = trip?.origin?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const summary =
+    trip?.origin && trip.destination
+      ? formatTripSummary(trip.origin.label, trip.destination.label, trip.time.hour, trip.time.minute, trip.loadLb)
+      : "Last trip";
+  const collapsed = Boolean(trip) || Boolean(state.result);
+  const label = state.result ? forecastLabel(state.result.heatmap.anchor, hour, timeZone) : "Weather at departure";
+  const showSheet = !desktop && (state.status === "loading" || state.status === "error" || Boolean(state.result));
+  const padding = useMemo<MapPadding>(() => {
+    if (desktop) return { top: 56, right: 56, bottom: 96, left: 400 };
+    return {
+      top: collapsed ? 88 : 200,
+      right: 28,
+      bottom: snap === "half" ? 460 : snap === "full" ? 160 : 360,
+      left: 28,
+    };
+  }, [desktop, collapsed, snap]);
+
+  const body = (
+    <div ref={focusRef} className="flex flex-col gap-3">
       {state.offline && <OfflineNotice />}
-      <Results
-        result={state.result}
-        selectedId={state.selectedId}
-        onSelect={(id) => dispatch({ type: "select", id })}
-      />
+      {state.status === "loading" && <RouteSkeletons />}
+      {state.status === "error" && state.error && <TripError message={state.error} onRetry={retry} />}
+      {state.status !== "loading" && state.result && (
+        <Results
+          result={state.result}
+          selectedId={state.selectedId}
+          timeZone={timeZone}
+          origin={trip?.origin ?? null}
+          destination={trip?.destination ?? null}
+          showTimeline={desktop || snap === "full"}
+          onSelect={onSelect}
+        />
+      )}
+      <p className="text-[11px] leading-4 text-stone-500">Sustained wind is scored. Gusts are shown and not scored.</p>
     </div>
-  ) : null;
+  );
+
+  const form = (
+    <TripForm
+      busy={state.status === "loading"}
+      initial={trip ?? undefined}
+      onSubmit={(values) => void onSubmit(values)}
+    />
+  );
 
   return (
-    <div className="flex min-h-dvh flex-col">
-      <header className="flex items-center justify-between gap-3 border-b border-stone-200 px-4 py-3">
-        <div>
-          <Header className="text-base font-semibold">Truck Weather Routes</Header>
-          <p className="text-xs text-stone-500">Sustained wind, load, and three routes</p>
-        </div>
-        <InstallButton />
-      </header>
-      <div className="flex min-h-0 flex-1 flex-col md:h-[calc(100dvh-4.5rem)] md:flex-row">
-        <section className="flex w-full flex-col gap-4 p-4 md:h-full md:w-[380px] md:shrink-0 md:overflow-y-auto">
-          <TripForm busy={state.status === "loading"} onSubmit={(values) => void onSubmit(values)} />
-          {state.error && (
-            <Alert status="danger">
-              <Alert.Indicator />
-              <Alert.Content>
-                <Alert.Description>{state.error}</Alert.Description>
-              </Alert.Content>
-            </Alert>
-          )}
-          {state.result && (
-            <HeatmapSlider hour={hour} label={label} onHour={changeHour} />
-          )}
-          {desktop && results}
-        </section>
-        <div className="relative h-[60vh] min-h-80 md:h-auto md:min-h-0 md:flex-1">
-          <LazyMap
-            ref={mapRef}
-            result={state.result}
-            selectedId={state.selectedId}
-            onSelect={(id) => dispatch({ type: "select", id })}
-          />
-        </div>
+    <div
+      className="relative h-dvh overflow-hidden bg-[#fafaf9]"
+        style={{
+          ["--map-control-top" as string]: desktop ? "0.75rem" : collapsed ? "4.75rem" : "auto",
+          ["--map-control-bottom" as string]: !desktop && !collapsed ? "5.5rem" : "auto",
+        }}
+    >
+      <div className="absolute inset-0">
+        <LazyMap ref={mapRef} padding={padding} result={state.result} selectedId={state.selectedId} onSelect={onSelect} />
       </div>
-      {!desktop && state.result && (
-        <Drawer state={drawer}>
-          <div className="fixed inset-x-0 bottom-4 z-20 flex justify-center">
-            <Button variant="primary" onPress={drawer.open}>
-              Routes
-            </Button>
-          </div>
-          <Drawer.Backdrop>
-            <Drawer.Content placement="bottom">
-              <Drawer.Dialog>
-                <Drawer.Handle />
-                <Drawer.Header>
-                  <Drawer.Heading>Routes</Drawer.Heading>
-                </Drawer.Header>
-                <Drawer.Body className="max-h-[70vh] overflow-y-auto">{results}</Drawer.Body>
-              </Drawer.Dialog>
-            </Drawer.Content>
-          </Drawer.Backdrop>
-        </Drawer>
+      {state.status === "loading" && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-30">
+          <ProgressBar aria-label="Checking routes" isIndeterminate className="w-full" size="sm">
+            <ProgressBar.Track>
+              <ProgressBar.Fill />
+            </ProgressBar.Track>
+          </ProgressBar>
+        </div>
       )}
-      <footer className="px-4 py-3 text-xs text-stone-500">
-        Weather © Open-Meteo (CC BY 4.0). Routes © openrouteservice / OpenStreetMap. Map © OpenFreeMap
-        / OpenMapTiles / OSM. Wind rules use sustained speed. Gusts are shown and not scored.
-      </footer>
+      <div className="sr-only" aria-live="polite">
+        {state.status === "loading" ? "Checking routes" : state.status === "error" ? state.error : ""}
+      </div>
+
+      {desktop ? (
+        <aside className="absolute bottom-4 left-4 top-4 z-20 flex w-[360px] max-w-[calc(100%-2rem)] flex-col">
+          <Surface className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl bg-white shadow-xl" variant="default">
+            <div className="flex items-start justify-between gap-3 px-4 pb-2 pt-4">
+              <div>
+                <h1 className="text-base font-semibold tracking-tight text-[#1C1917]">Truck Weather Routes</h1>
+                <p className="text-xs text-stone-500">Sustained wind, load, and three routes</p>
+              </div>
+              <InstallButton />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+              {collapsed && !editing ? (
+                <div className="sticky top-0 z-10 -mx-4 mb-3 bg-white px-4 pb-3">
+                  <TripBar summary={summary} onEdit={() => setEditing(true)} />
+                </div>
+              ) : (
+                <div className="mb-3">
+                  {collapsed && (
+                    <Button className="mb-2 h-11" size="sm" variant="ghost" onPress={() => setEditing(false)}>
+                      Back to routes
+                    </Button>
+                  )}
+                  {form}
+                </div>
+              )}
+              {collapsed && !editing && body}
+            </div>
+          </Surface>
+        </aside>
+      ) : (
+        <>
+          <div className="absolute inset-x-0 top-0 z-20 px-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
+            {collapsed ? (
+              <>
+                <h1 className="sr-only">Truck Weather Routes</h1>
+                <TripBar summary={summary} onEdit={() => editDrawer.open()} />
+              </>
+            ) : (
+              <Surface
+                className="flex max-h-[78dvh] flex-col overflow-hidden rounded-2xl bg-white p-4 shadow-xl"
+                variant="default"
+              >
+                <div className="mb-3 flex shrink-0 items-start justify-between gap-3">
+                  <div>
+                    <h1 className="text-base font-semibold tracking-tight text-[#1C1917]">Truck Weather Routes</h1>
+                    <p className="text-xs text-stone-500">Sustained wind, load, and three routes</p>
+                  </div>
+                  <InstallButton />
+                </div>
+                {form}
+              </Surface>
+            )}
+          </div>
+          {showSheet && (
+            <RouteSheet snap={snap} fit={state.status === "error"} onSnap={setSnap}>
+              {body}
+            </RouteSheet>
+          )}
+          <Drawer state={editDrawer}>
+            <Drawer.Backdrop>
+              <Drawer.Content placement="bottom">
+                <Drawer.Dialog>
+                  <Drawer.Handle />
+                  <Drawer.Header>
+                    <Drawer.Heading>Edit trip</Drawer.Heading>
+                  </Drawer.Header>
+                  <Drawer.Body className="max-h-[78vh] overflow-y-auto">
+                    {trip && (
+                      <TripForm
+                        key={`${trip.origin?.id ?? ""}-${trip.destination?.id ?? ""}`}
+                        busy={state.status === "loading"}
+                        initial={trip}
+                        onSubmit={(values) => void onSubmit(values)}
+                      />
+                    )}
+                  </Drawer.Body>
+                </Drawer.Dialog>
+              </Drawer.Content>
+            </Drawer.Backdrop>
+          </Drawer>
+        </>
+      )}
+
+      {state.status === "idle" && !state.result && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-[max(2.25rem,env(safe-area-inset-bottom))] z-10 flex justify-center px-4 pr-16">
+          <p className="rounded-full bg-white px-4 py-2 text-center text-sm text-stone-600 shadow-md">
+            Pick two places to compare 3 truck routes
+          </p>
+        </div>
+      )}
+
+      {state.result && state.status !== "loading" && (desktop || snap !== "full") && (
+        <div
+          className="pointer-events-none absolute z-10 flex items-end gap-2"
+          style={
+            desktop
+              ? { left: 400, right: 16, bottom: 16 }
+              : { left: 12, right: 12, bottom: snap === "half" ? "calc(62dvh + 12px)" : "calc(min(400px, 48dvh) + 12px)" }
+          }
+        >
+          <div className="pointer-events-auto min-w-0 flex-1">
+            <HeatmapSlider caption={HEATMAP_CAPTION} hour={hour} label={label} onHour={changeHour} />
+          </div>
+          <div className="pointer-events-auto shrink-0">
+            <RiskLegend compact={!desktop} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RouteSkeletons() {
+  return (
+    <div aria-hidden="true" className="flex flex-col gap-3">
+      <Skeleton animationType="shimmer" className="h-6 w-40 rounded-lg" />
+      <Skeleton animationType="shimmer" className="h-28 w-full rounded-2xl" />
+      <Skeleton animationType="shimmer" className="h-28 w-full rounded-2xl" />
+      <Skeleton animationType="shimmer" className="h-28 w-full rounded-2xl" />
+    </div>
+  );
+}
+
+function TripError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <Alert status="danger">
+        <Alert.Indicator />
+        <Alert.Content>
+          <Alert.Title>Could not compare routes</Alert.Title>
+          <Alert.Description>{message}</Alert.Description>
+        </Alert.Content>
+      </Alert>
+      <Button className="h-11 min-h-11" variant="primary" onPress={onRetry}>
+        Retry
+      </Button>
     </div>
   );
 }

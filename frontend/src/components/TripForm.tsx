@@ -1,6 +1,5 @@
 import {
   Button,
-  Chip,
   ComboBox,
   DateField,
   Description,
@@ -50,12 +49,14 @@ export function departureStamp(values: TripValues): string {
 
 export function TripForm({
   busy,
+  initial,
   onSubmit,
 }: {
   busy: boolean;
+  initial?: TripValues;
   onSubmit: (values: TripValues) => void;
 }) {
-  const [values, setValues] = useState(initialTrip);
+  const [values, setValues] = useState(() => initial ?? initialTrip());
   const [error, setError] = useState("");
 
   function submit() {
@@ -73,12 +74,13 @@ export function TripForm({
 
   return (
     <form
-      className="flex flex-col gap-4"
+      className="flex min-h-0 flex-1 flex-col"
       onSubmit={(event) => {
         event.preventDefault();
         submit();
       }}
     >
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
       <PlaceField
         label="Origin"
         place={values.origin}
@@ -89,7 +91,7 @@ export function TripForm({
         place={values.destination}
         onPlace={(destination) => setValues((current) => ({ ...current, destination }))}
       />
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-2 gap-3">
         <DateField
           granularity="day"
           value={values.date}
@@ -133,15 +135,15 @@ export function TripForm({
       </NumberField>
       <div className="flex flex-wrap gap-2">
         {[20000, 35000, 45000].map((pounds) => (
-          <Chip
+          <Button
             key={pounds}
-            className="cursor-pointer"
-            color={values.loadLb === pounds ? "accent" : "default"}
+            className="h-11 min-h-11"
+            size="sm"
             variant={values.loadLb === pounds ? "primary" : "secondary"}
-            onClick={() => setValues((current) => ({ ...current, loadLb: pounds }))}
+            onPress={() => setValues((current) => ({ ...current, loadLb: pounds }))}
           >
             {pounds.toLocaleString()} lb
-          </Chip>
+          </Button>
         ))}
       </div>
       <Tabs
@@ -153,15 +155,15 @@ export function TripForm({
         <Label>Sample every</Label>
         <Tabs.ListContainer>
           <Tabs.List aria-label="Sample interval">
-            <Tabs.Tab id="10">
+            <Tabs.Tab id="10" className="min-h-11">
               10 mi
               <Tabs.Indicator />
             </Tabs.Tab>
-            <Tabs.Tab id="25">
+            <Tabs.Tab id="25" className="min-h-11">
               25 mi
               <Tabs.Indicator />
             </Tabs.Tab>
-            <Tabs.Tab id="50">
+            <Tabs.Tab id="50" className="min-h-11">
               50 mi
               <Tabs.Indicator />
             </Tabs.Tab>
@@ -173,7 +175,8 @@ export function TripForm({
           {error}
         </p>
       )}
-      <Button fullWidth isDisabled={busy} type="button" variant="primary" onPress={submit}>
+      </div>
+      <Button className="mt-3 h-11 min-h-11 shrink-0" fullWidth isDisabled={busy} type="button" variant="primary" onPress={submit}>
         {busy ? "Checking routes…" : "Compare routes"}
       </Button>
     </form>
@@ -190,7 +193,7 @@ function PlaceField({
   onPlace: (place: Place | null) => void;
 }) {
   const [text, setText] = useState(place?.label ?? "");
-  const [items, setItems] = useState<Place[]>([]);
+  const [items, setItems] = useState<Place[]>(place ? [place] : []);
 
   useEffect(() => {
     if (place && text === place.label) return;

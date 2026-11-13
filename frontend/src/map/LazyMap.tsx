@@ -1,13 +1,14 @@
 import { Suspense, forwardRef, lazy } from "react";
 
 import type { AnalyzeResponse } from "../types";
-import type { MapHandle } from "./MapView";
+import type { MapHandle, MapPadding } from "./MapView";
 
 const LoadedMap = lazy(() => import("./MapView").then((mod) => ({ default: mod.MapView })));
 
 type MapProps = {
   result: AnalyzeResponse | null;
   selectedId: string | null;
+  padding: MapPadding;
   onSelect: (id: string) => void;
 };
 

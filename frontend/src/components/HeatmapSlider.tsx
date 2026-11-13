@@ -4,10 +4,12 @@ import { useLayoutEffect, useRef } from "react";
 export function HeatmapSlider({
   hour,
   label,
+  caption,
   onHour,
 }: {
   hour: number;
   label: string;
+  caption?: string;
   onHour: (hour: number) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -17,25 +19,26 @@ export function HeatmapSlider({
       ?.setAttribute("aria-valuetext", label);
   }, [label, hour]);
   return (
-    <div ref={rootRef}>
-    <Slider
-      aria-label="Forecast hour"
-      className="w-full"
-      maxValue={48}
-      minValue={0}
-      step={1}
-      value={hour}
-      onChange={(value) => onHour(Array.isArray(value) ? value[0] : value)}
-    >
-      <div className="flex items-baseline justify-between gap-3">
-        <Label>Forecast, 0–48 hours</Label>
-        <Slider.Output>{label}</Slider.Output>
-      </div>
-      <Slider.Track>
-        <Slider.Fill />
-        <Slider.Thumb aria-valuetext={label} />
-      </Slider.Track>
-    </Slider>
+    <div ref={rootRef} className="rounded-2xl bg-white/95 px-3 py-2 shadow-md">
+      <Slider
+        aria-label="Forecast hour"
+        className="w-full"
+        maxValue={48}
+        minValue={0}
+        step={1}
+        value={hour}
+        onChange={(value) => onHour(Array.isArray(value) ? value[0] : value)}
+      >
+        <div className="flex items-baseline justify-between gap-3">
+          <Label className="sr-only">Forecast hour</Label>
+          <Slider.Output className="text-left text-xs font-medium text-[#1C1917]">{label}</Slider.Output>
+        </div>
+        <Slider.Track>
+          <Slider.Fill />
+          <Slider.Thumb aria-valuetext={label} />
+        </Slider.Track>
+      </Slider>
+      {caption && <p className="mt-1 text-[11px] text-stone-500">{caption}</p>}
     </div>
   );
 }
