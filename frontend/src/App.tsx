@@ -7,7 +7,8 @@ import { OfflineNotice } from "./components/OfflineNotice";
 import { InstallButton } from "./components/InstallButton";
 import { Results } from "./components/Results";
 import { TripForm, departureStamp, type TripValues } from "./components/TripForm";
-import { MapView, type MapHandle } from "./map/MapView";
+import { LazyMap } from "./map/LazyMap";
+import type { MapHandle } from "./map/MapView";
 import { hourLabel } from "./format";
 import { loadLastResult, saveLastResult } from "./pwa/lastResult";
 import type { AnalyzeResponse } from "./types";
@@ -183,7 +184,7 @@ export function App() {
           {desktop && results}
         </section>
         <div className="relative h-[60vh] min-h-80 md:h-auto md:min-h-0 md:flex-1">
-          <MapView
+          <LazyMap
             ref={mapRef}
             result={state.result}
             selectedId={state.selectedId}

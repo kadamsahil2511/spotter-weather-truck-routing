@@ -9,7 +9,15 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
+      includeAssets: [
+        "favicon.svg",
+        "icon-192.png",
+        "icon-512.png",
+        "icon-512-maskable.png",
+        "apple-touch-icon.png",
+        "screenshot-wide.png",
+        "screenshot-narrow.png",
+      ],
       manifest: {
         name: "Truck Weather Routes",
         short_name: "Truck Routes",
@@ -19,8 +27,25 @@ export default defineConfig({
         background_color: "#fafaf9",
         theme_color: "#1c1917",
         icons: [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+          { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          { src: "/icon-512-maskable.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+        ],
+        screenshots: [
+          {
+            src: "/screenshot-wide.png",
+            sizes: "1280x720",
+            type: "image/png",
+            form_factor: "wide",
+            label: "Route comparison on a wide screen",
+          },
+          {
+            src: "/screenshot-narrow.png",
+            sizes: "390x844",
+            type: "image/png",
+            form_factor: "narrow",
+            label: "Trip form on a phone",
+          },
         ],
       },
       workbox: {
@@ -29,6 +54,16 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("maplibre-gl")) return "maplibre";
+          if (id.includes("node_modules")) return "vendor";
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": "http://127.0.0.1:8000",

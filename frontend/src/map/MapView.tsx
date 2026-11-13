@@ -1,4 +1,10 @@
-import maplibregl, { type GeoJSONSource, type Map } from "maplibre-gl";
+import {
+  GeoJSONSource,
+  LngLatBounds,
+  Map,
+  type MapLayerMouseEvent,
+  NavigationControl,
+} from "maplibre-gl";
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -37,13 +43,13 @@ export const MapView = memo(
       useEffect(() => {
         const node = containerRef.current;
         if (!node || mapRef.current) return;
-        const map = new maplibregl.Map({
+        const map = new Map({
           container: node,
           style: "https://tiles.openfreemap.org/styles/positron",
           center: [-96, 39],
           zoom: 3.4,
         });
-        map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+        map.addControl(new NavigationControl({ showCompass: false }), "top-right");
         map.on("load", () => {
           map.addSource("heatmap", { type: "geojson", data: EMPTY });
           map.addLayer({
@@ -126,11 +132,11 @@ export const MapView = memo(
               "circle-stroke-width": 1.5,
             },
           });
-          map.on("click", "route-line", (event) => {
+          map.on("click", "route-line", (event: MapLayerMouseEvent) => {
             const id = event.features?.[0]?.properties?.id;
             if (typeof id === "string") onSelectRef.current(id);
           });
-          map.on("click", "checkpoints", (event) => {
+          map.on("click", "checkpoints", (event: MapLayerMouseEvent) => {
             const props = event.features?.[0]?.properties;
             if (!props) return;
             if (typeof props.routeId === "string") onSelectRef.current(props.routeId);
@@ -180,7 +186,7 @@ function paint(map: Map, result: AnalyzeResponse | null, selectedId: string | nu
       recommended: route.recommended,
     });
   }
-  const bounds = new maplibregl.LngLatBounds();
+  const bounds = new LngLatBounds();
   let any = false;
   for (const route of result.routes) {
     for (const [lon, lat] of route.geometry) {
