@@ -3,12 +3,17 @@ name: fs-truck
 services:
   api:
     container_name: fs-truck-api
+    image: fs-truck-api:${IMAGE_TAG:-latest}
     build: .
-    env_file: .env
+    env_file: ${ENV_FILE:-.env}
+    stop_grace_period: 20s
     environment:
       DJANGO_DEBUG: "0"
-      ALLOWED_HOSTS: fsapi.kadamsahil.com,127.0.0.1,localhost
+      ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-fsapi.kadamsahil.com,127.0.0.1,localhost}
       REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-2}
     ports:
       - "127.0.0.1:8002:8000"
     mem_limit: 512m

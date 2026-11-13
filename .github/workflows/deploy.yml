@@ -58,7 +58,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "$VPS_USER@$VPS_HOST" \
-            'cd /opt/fs-truck/src && git fetch origin main && git checkout -B main origin/main && git reset --hard origin/main && cd /opt/fs-truck && docker compose -p fs-truck up -d --build api'
+            'cd /opt/fs-truck/src && git fetch origin main && git checkout -B main origin/main && git reset --hard origin/main && cd /opt/fs-truck/src && ENV_FILE=/opt/fs-truck/.env IMAGE_TAG=$(git rev-parse --short=12 HEAD) docker compose -p fs-truck up -d --build api'
 
       - name: Health check
         if: steps.secrets.outputs.ready == 'true'
