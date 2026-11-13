@@ -9,6 +9,7 @@ type MapProps = {
   result: AnalyzeResponse | null;
   selectedId: string | null;
   padding: MapPadding;
+  following?: boolean;
   onSelect: (id: string) => void;
 };
 

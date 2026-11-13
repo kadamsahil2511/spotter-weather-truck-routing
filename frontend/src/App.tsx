@@ -1,7 +1,7 @@
 import { Alert, Button, Drawer, ProgressBar, Skeleton, Surface, useOverlayState } from "@heroui/react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import { analyze } from "./api";
+import { analyze, recheck } from "./api";
 import { ANALYZE_TIMEOUT_MESSAGE, ANALYZE_TIMEOUT_MS, loadingStage } from "./loading";
 import { HeatmapSlider } from "./components/HeatmapSlider";
 import { InstallButton } from "./components/InstallButton";
@@ -11,7 +11,16 @@ import { RiskLegend } from "./components/RiskLegend";
 import { RouteSheet, type SheetSnap } from "./components/RouteSheet";
 import { TripBar } from "./components/TripBar";
 import { TripForm, departureStamp, type TripValues } from "./components/TripForm";
-import { HEATMAP_CAPTION, forecastLabel, formatTripSummary } from "./format";
+import { HEATMAP_CAPTION, forecastLabel, formatDuration, formatMiles, formatTripSummary } from "./format";
+import {
+  isOffRoute,
+  nextRiskAhead,
+  pointAtMile,
+  progressAlong,
+  RECHECK_MS,
+  remainingEta,
+  saferRouteSuggestion,
+} from "./follow";
 import { LazyMap } from "./map/LazyMap";
 import type { MapHandle, MapPadding } from "./map/MapView";
 import { loadLastResult, saveLastResult } from "./pwa/lastResult";
@@ -31,6 +40,7 @@ type Action =
   | { type: "cached"; result: AnalyzeResponse }
   | { type: "error"; message: string }
   | { type: "select"; id: string }
+  | { type: "refresh"; result: AnalyzeResponse; selectedId: string }
   | { type: "online" };
 
 const initial: State = {
@@ -67,6 +77,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, status: "error", error: action.message };
     case "select":
       return { ...state, selectedId: action.id };
+    case "refresh":
+      return { ...state, status: "ready", result: action.result, selectedId: action.selectedId, error: null };
     case "online":
       return { ...state, offline: false };
     default:
@@ -81,6 +93,17 @@ export function App() {
   const [editing, setEditing] = useState(false);
   const [snap, setSnap] = useState<SheetSnap>("peek");
   const [loadingNote, setLoadingNote] = useState("Finding truck routes…");
+  const [following, setFollowing] = useState(false);
+  const [headingUp, setHeadingUp] = useState(false);
+  const [followNote, setFollowNote] = useState<string | null>(null);
+  const [suggestion, setSuggestion] = useState<{ routeId: string; message: string } | null>(null);
+  const [followError, setFollowError] = useState<string | null>(null);
+  const simulate = useMemo(() => new URLSearchParams(window.location.search).get("simulate") === "1", []);
+  const driven = useRef(0);
+  const drivenRoute = useRef<string | null>(null);
+  const lastRecheck = useRef(0);
+  const [recheckTick, setRecheckTick] = useState(0);
+  const pendingRecheck = useRef<AnalyzeResponse | null>(null);
   const desktop = useDesktop();
   const editDrawer = useOverlayState();
   const mapRef = useRef<MapHandle>(null);
@@ -112,6 +135,112 @@ export function App() {
     const timer = window.setInterval(() => setLoadingNote(loadingStage(Date.now() - started)), 400);
     return () => window.clearInterval(timer);
   }, [state.status]);
+
+  useEffect(() => {
+    if (!following) {
+      mapRef.current?.setPuck(null);
+      setFollowNote(null);
+      return;
+    }
+    const route = state.result?.routes.find((item) => item.id === state.selectedId);
+    if (!route) return;
+    if (drivenRoute.current !== route.id) {
+      driven.current = 0;
+      drivenRoute.current = route.id;
+    }
+    const show = (lon: number, lat: number) => {
+      const progress = progressAlong(route.geometry, lon, lat);
+      if (!progress) return;
+      driven.current = progress.mile;
+      const bearing = headingUp ? progress.bearing : null;
+      mapRef.current?.setPuck({ lon: progress.snapped[0], lat: progress.snapped[1], bearing });
+      mapRef.current?.followFrame(progress.snapped[0], progress.snapped[1], bearing);
+      if (isOffRoute(progress.distanceMi)) {
+        setFollowNote("Off route");
+        return;
+      }
+      const risk = nextRiskAhead(route.checkpoints, progress.mile);
+      const left = remainingEta(route, progress.mile);
+      const remain = `${formatMiles(left.miles)} mi left · ${formatDuration(left.seconds)}`;
+      setFollowNote(risk ? `${risk.text} · ${remain}` : remain);
+    };
+    let watchId = 0;
+    let timer = 0;
+    if (simulate) {
+      const length = Math.max(route.distance_mi, 1);
+      const tick = () => {
+        const mile = Math.min(length, driven.current + 8);
+        const at = pointAtMile(route.geometry, mile);
+        if (at) show(at[0], at[1]);
+      };
+      tick();
+      timer = window.setInterval(tick, 300);
+    } else if (!navigator.geolocation) {
+      setFollowError("This browser has no location. Open with ?simulate=1 to preview the drive.");
+    } else {
+      watchId = navigator.geolocation.watchPosition(
+        (position) => show(position.coords.longitude, position.coords.latitude),
+        () => setFollowError("Location is off. Allow location to follow, or open this page with ?simulate=1."),
+        { enableHighAccuracy: false, maximumAge: 20000, timeout: 20000 },
+      );
+    }
+    return () => {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      window.clearInterval(timer);
+    };
+  }, [following, headingUp, simulate, state.selectedId, state.result]);
+
+  useEffect(() => {
+    if (!following || !trip?.origin || !trip.destination || !state.selectedId) return;
+    let stopped = false;
+    const selectedId = state.selectedId;
+    const run = async () => {
+      const now = Date.now();
+      if (lastRecheck.current !== 0 && now - lastRecheck.current < 2 * 60 * 1000) return;
+      const route = state.result?.routes.find((item) => item.id === selectedId);
+      const at = route ? pointAtMile(route.geometry, driven.current) : null;
+      if (!at || !trip.destination) return;
+      lastRecheck.current = now;
+      try {
+        const next = await recheck(
+          {
+            origin: {
+              id: "here",
+              label: "Current location",
+              lon: at[0],
+              lat: at[1],
+              timezone: trip.origin?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+            },
+            destination: trip.destination,
+            departure: departureStamp({ ...trip, departAt: false }),
+            load_lb: trip.loadLb,
+            sample_miles: trip.sampleMiles,
+          },
+          new AbortController().signal,
+        );
+        if (stopped) return;
+        pendingRecheck.current = next;
+        setSuggestion(saferRouteSuggestion(selectedId, next));
+        if (next.routes.some((item) => item.id === selectedId)) {
+          dispatch({ type: "refresh", result: next, selectedId });
+        }
+      } catch {
+        lastRecheck.current = 0;
+      }
+    };
+    const first = window.setTimeout(() => void run(), 1200);
+    const interval = window.setInterval(() => void run(), RECHECK_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void run();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      window.clearTimeout(first);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [following, trip, state.selectedId, state.result, recheckTick]);
 
   useEffect(() => {
     if (state.status !== "ready" || !state.result) return;
@@ -193,11 +322,14 @@ export function App() {
   const showSheet = !desktop && (state.status === "loading" || state.status === "error" || Boolean(state.result));
   const padding = useMemo<MapPadding>(() => {
     if (desktop) return { top: 56, right: 56, bottom: 96, left: 400 };
-    const formTop = typeof window !== "undefined" ? Math.round(window.innerHeight * 0.46) : 360;
+    if (!collapsed) {
+      const formTop = typeof window !== "undefined" ? Math.round(window.innerHeight * 0.52) : 420;
+      return { top: formTop, right: 20, bottom: 96, left: 20 };
+    }
     return {
-      top: collapsed ? 88 : formTop,
+      top: 88,
       right: 28,
-      bottom: snap === "half" ? 460 : snap === "full" ? 160 : 280,
+      bottom: snap === "half" ? 460 : snap === "full" ? 160 : 300,
       left: 28,
     };
   }, [desktop, collapsed, snap]);
@@ -223,6 +355,12 @@ export function App() {
           showTimeline={desktop || snap === "full"}
           onSelect={onSelect}
           onSteps={desktop ? undefined : () => setSnap("full")}
+          onFollow={() => {
+            setFollowError(null);
+            setSuggestion(null);
+            setFollowing((current) => !current);
+          }}
+          following={following}
         />
       )}
       <p className="text-[11px] leading-4 text-stone-500">Sustained wind is scored. Gusts are shown and not scored.</p>
@@ -251,7 +389,14 @@ export function App() {
         }}
     >
       <div className="absolute inset-0">
-        <LazyMap ref={mapRef} padding={padding} result={state.result} selectedId={state.selectedId} onSelect={onSelect} />
+        <LazyMap
+          ref={mapRef}
+          following={following}
+          padding={padding}
+          result={state.result}
+          selectedId={state.selectedId}
+          onSelect={onSelect}
+        />
       </div>
       {state.status === "loading" && (
         <div className="pointer-events-none absolute inset-x-0 top-0 z-30">
@@ -347,6 +492,60 @@ export function App() {
             </Drawer.Backdrop>
           </Drawer>
         </>
+      )}
+
+      {following && (followNote || followError || suggestion) && (
+        <div className="absolute inset-x-3 top-[max(4.5rem,env(safe-area-inset-top))] z-30 flex flex-col items-center gap-2 md:left-[400px]">
+          {followError && (
+            <p className="max-w-md rounded-2xl bg-white px-4 py-2 text-sm text-[#1C1917] shadow-md">{followError}</p>
+          )}
+          {followNote && (
+            <div className="flex max-w-lg items-center gap-2 rounded-full bg-[#1C1917] px-4 py-2 text-sm text-[#fafaf9] shadow-md">
+              <span>{followNote}</span>
+              {followNote === "Off route" && (
+                <button
+                  className="rounded-full bg-white px-3 py-1 text-xs font-medium text-[#1C1917]"
+                  type="button"
+                  onClick={() => {
+                    lastRecheck.current = 0;
+                    setRecheckTick((tick) => tick + 1);
+                  }}
+                >
+                  Recheck
+                </button>
+              )}
+              <button
+                className="rounded-full border border-white/40 px-3 py-1 text-xs"
+                type="button"
+                onClick={() => setHeadingUp((current) => !current)}
+              >
+                {headingUp ? "North up" : "Heading up"}
+              </button>
+            </div>
+          )}
+          {suggestion && (
+            <div className="w-full max-w-md rounded-2xl bg-white p-3 shadow-lg">
+              <p className="text-sm font-medium text-[#1C1917]">{suggestion.message}</p>
+              <div className="mt-2 flex gap-2">
+                <Button
+                  className="h-11"
+                  variant="primary"
+                  onPress={() => {
+                    const pending = pendingRecheck.current;
+                    if (pending) dispatch({ type: "refresh", result: pending, selectedId: suggestion.routeId });
+                    else dispatch({ type: "select", id: suggestion.routeId });
+                    setSuggestion(null);
+                  }}
+                >
+                  Switch
+                </Button>
+                <Button className="h-11" variant="secondary" onPress={() => setSuggestion(null)}>
+                  Keep this route
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {state.status === "idle" && !state.result && (

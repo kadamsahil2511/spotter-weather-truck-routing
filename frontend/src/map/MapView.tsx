@@ -31,8 +31,16 @@ export interface MapPadding {
   left: number;
 }
 
+export interface MapPuck {
+  lon: number;
+  lat: number;
+  bearing: number | null;
+}
+
 export interface MapHandle {
   setHour: (hour: number) => void;
+  setPuck: (puck: MapPuck | null) => void;
+  followFrame: (lon: number, lat: number, bearing: number | null) => void;
 }
 
 const LEVEL_COLOR: unknown[] = [
@@ -58,9 +66,10 @@ export const MapView = memo(
       result: AnalyzeResponse | null;
       selectedId: string | null;
       padding: MapPadding;
+      following?: boolean;
       onSelect: (id: string) => void;
     }
-  >(function MapView({ result, selectedId, padding, onSelect }, ref) {
+  >(function MapView({ result, selectedId, padding, following = false, onSelect }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<Map | null>(null);
     const markersRef = useRef<Marker[]>([]);
@@ -68,8 +77,11 @@ export const MapView = memo(
     const selectedRef = useRef(selectedId);
     const hourRef = useRef(0);
     const paddingRef = useRef(padding);
-    const fitKeyRef = useRef("");
-    const onSelectRef = useRef(onSelect);
+      const fitKeyRef = useRef("");
+      const puckRef = useRef<Marker | null>(null);
+      const followingRef = useRef(following);
+      const onSelectRef = useRef(onSelect);
+      followingRef.current = following;
     onSelectRef.current = onSelect;
     resultRef.current = result;
     selectedRef.current = selectedId;
@@ -83,6 +95,35 @@ export const MapView = memo(
         if (!map || !current || !map.getSource("heatmap")) return;
         (map.getSource("heatmap") as GeoJSONSource).setData(heatmapData(current, hour));
         if (map.getLayer("heatmap")) map.setPaintProperty("heatmap", "heatmap-opacity", hour === 0 ? 0.12 : 0.72);
+      },
+      setPuck(puck: MapPuck | null) {
+        const map = mapRef.current;
+        if (!map) return;
+        if (!puck) {
+          puckRef.current?.remove();
+          puckRef.current = null;
+          return;
+        }
+        if (!puckRef.current) {
+          const dot = document.createElement("div");
+          dot.className = "location-puck";
+          puckRef.current = new Marker({ element: dot, rotationAlignment: "map", pitchAlignment: "map" })
+            .setLngLat([puck.lon, puck.lat])
+            .addTo(map);
+        } else {
+          puckRef.current.setLngLat([puck.lon, puck.lat]);
+        }
+        puckRef.current.setRotation(puck.bearing ?? 0);
+      },
+      followFrame(lon: number, lat: number, bearing: number | null) {
+        const map = mapRef.current;
+        if (!map) return;
+        const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        map.easeTo({
+          center: [lon, lat],
+          bearing: bearing ?? 0,
+          duration: reduce ? 0 : 400,
+        });
       },
     }));
 
@@ -222,14 +263,17 @@ export const MapView = memo(
           hourRef.current,
           paddingRef.current,
           fitKeyRef,
+          followingRef.current,
           (id) => onSelectRef.current(id),
         );
       });
       mapRef.current = map;
       return () => {
-        clearMarkers(markersRef.current);
-        markersRef.current = [];
-        map.remove();
+          clearMarkers(markersRef.current);
+          markersRef.current = [];
+          puckRef.current?.remove();
+          puckRef.current = null;
+          map.remove();
         mapRef.current = null;
       };
     }, []);
@@ -238,12 +282,12 @@ export const MapView = memo(
       const map = mapRef.current;
       if (!map) return;
       const apply = () =>
-        paint(map, markersRef, result, selectedId, hourRef.current, padding, fitKeyRef, (id) =>
+        paint(map, markersRef, result, selectedId, hourRef.current, padding, fitKeyRef, followingRef.current, (id) =>
           onSelectRef.current(id),
         );
       if (map.isStyleLoaded()) apply();
       else map.once("idle", apply);
-    }, [result, selectedId, padding]);
+    }, [result, selectedId, padding, following]);
 
     return <div ref={containerRef} className="map-shell h-full w-full" />;
   }),
@@ -297,6 +341,7 @@ function paint(
   hour: number,
   padding: MapPadding,
   fitKeyRef: { current: string },
+  following: boolean,
   onSelect: (id: string) => void,
 ) {
   const heatmap = map.getSource("heatmap") as GeoJSONSource | undefined;
@@ -314,7 +359,7 @@ function paint(
     hits.setData(EMPTY);
     dots.setData(EMPTY);
     const frame = `conus:${padding.top}:${padding.bottom}:${padding.left}:${padding.right}`;
-    if (fitKeyRef.current !== frame) {
+    if (!following && fitKeyRef.current !== frame) {
       fitKeyRef.current = frame;
       const bounds = new LngLatBounds([-124.8, 24.4], [-66.9, 49.4]);
       map.fitBounds(bounds, { padding, duration: 0, maxZoom: 5 });
@@ -330,7 +375,7 @@ function paint(
   dots.setData(lowDotCollection(chosen));
   markersRef.current = placeMarkers(map, result, chosen, onSelect);
   const fitKey = `${result.routes.map((route) => route.id).join(",")}:${padding.top}:${padding.bottom}:${padding.left}:${padding.right}`;
-  if (fitKey !== fitKeyRef.current) {
+  if (!following && fitKey !== fitKeyRef.current) {
     fitKeyRef.current = fitKey;
     const bounds = new LngLatBounds();
     let any = false;

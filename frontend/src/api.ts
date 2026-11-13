@@ -24,8 +24,8 @@ export async function geocode(query: string, signal: AbortSignal): Promise<Place
   }));
 }
 
-export async function analyze(payload: AnalyzeRequest, signal: AbortSignal): Promise<AnalyzeResponse> {
-  const response = await fetch(`${base}/api/analyze`, {
+async function postAnalyze(path: string, payload: AnalyzeRequest, signal: AbortSignal): Promise<AnalyzeResponse> {
+  const response = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -36,4 +36,13 @@ export async function analyze(payload: AnalyzeRequest, signal: AbortSignal): Pro
     throw new ApiError(body.error?.message ?? "The trip could not be analyzed.", response.status);
   }
   return body as AnalyzeResponse;
+}
+
+export function analyze(payload: AnalyzeRequest, signal: AbortSignal): Promise<AnalyzeResponse> {
+  return postAnalyze("/api/analyze", payload, signal);
+}
+
+/** Same ranking pipeline, from the current position to the original destination. */
+export function recheck(payload: AnalyzeRequest, signal: AbortSignal): Promise<AnalyzeResponse> {
+  return postAnalyze("/api/recheck", payload, signal);
 }

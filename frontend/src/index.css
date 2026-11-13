@@ -103,6 +103,15 @@ body {
   color: #fafaf9;
 }
 
+.location-puck {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #1c1917;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 7px rgba(28, 25, 23, 0.18);
+}
+
 .weather-pill {
   border: 1px solid #e7e5e4;
   border-radius: 999px;

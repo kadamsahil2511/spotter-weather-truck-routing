@@ -98,17 +98,16 @@ export function TripForm({
       }}
     >
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-      <div className="relative">
-        <PlaceField
-          key={`origin-${values.origin?.id ?? "empty"}`}
-          label="Origin"
-          place={values.origin}
-          onPlace={(origin) => setValues((current) => ({ ...current, origin }))}
-        />
+      <PlaceField
+        key={`origin-${values.origin?.id ?? "empty"}`}
+        label="Origin"
+        place={values.origin}
+        onPlace={(origin) => setValues((current) => ({ ...current, origin }))}
+      />
+      <div className="flex justify-center">
         <Button
           aria-label="Swap origin and destination"
-          className="absolute -bottom-3 right-2 z-10 h-11 min-h-11 w-11 min-w-11"
-          isIconOnly
+          className="h-11 min-h-11"
           size="sm"
           variant="secondary"
           onPress={() =>
@@ -119,7 +118,7 @@ export function TripForm({
             }))
           }
         >
-          ↕
+          Swap
         </Button>
       </div>
       <PlaceField

@@ -25,6 +25,8 @@ export function Results({
   showTimeline = true,
   scope = "all",
   onSteps,
+  onFollow,
+  following = false,
 }: {
   result: AnalyzeResponse;
   selectedId: string | null;
@@ -35,6 +37,8 @@ export function Results({
   showTimeline?: boolean;
   scope?: "all" | "selected";
   onSteps?: () => void;
+  onFollow?: () => void;
+  following?: boolean;
 }) {
   const recommendedId = result.recommendation?.route_id ?? null;
   const selected = result.routes.find((route) => route.id === selectedId) ?? result.routes[0];
@@ -101,6 +105,8 @@ export function Results({
               showAverage={showTimeline}
               onSelect={onSelect}
               onSteps={onSteps}
+              onFollow={onFollow}
+              following={following}
             />
             {route.warnings.includes("no_travel") && (
               <Alert className="mt-2" status="danger">
@@ -137,6 +143,8 @@ function RouteCard({
   showAverage,
   onSelect,
   onSteps,
+  onFollow,
+  following,
 }: {
   route: RouteResult;
   selected: boolean;
@@ -147,6 +155,8 @@ function RouteCard({
   showAverage: boolean;
   onSelect: (id: string) => void;
   onSteps?: () => void;
+  onFollow?: () => void;
+  following?: boolean;
 }) {
   const arrival = route.checkpoints.at(-1)?.eta;
   const href = googleMapsDirectionsUrl(route, origin, destination);
@@ -202,6 +212,11 @@ function RouteCard({
           {onSteps && (
             <button className="button button--secondary h-11 min-w-24" type="button" onClick={onSteps}>
               Steps
+            </button>
+          )}
+          {onFollow && (
+            <button className="button button--secondary h-11 min-w-24" type="button" onClick={onFollow}>
+              {following ? "Stop" : "Follow"}
             </button>
           )}
           </div>
