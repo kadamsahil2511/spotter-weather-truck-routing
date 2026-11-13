@@ -2,6 +2,7 @@ import pytest
 
 from app.risk import (
     Ranked,
+    align_display,
     apply_load,
     classify_rain,
     classify_snow,
@@ -82,6 +83,21 @@ def test_combine_takes_the_worst_and_ignores_null():
     assert level == "high"
     assert partial is True
     assert combine(None, None, None) == ("unknown", True)
+
+
+def test_display_miles_sum_to_the_route_distance():
+    miles, summary = align_display(["low", "severe", "low"], [0, 10.04, 25.26], 30.0)
+    buckets = (
+        summary.low_mi
+        + summary.moderate_mi
+        + summary.high_mi
+        + summary.severe_mi
+        + summary.no_travel_mi
+        + summary.unknown_mi
+    )
+    assert miles[-1] == 30.0
+    assert buckets == pytest.approx(30.0)
+    assert summary.severe_mi > 0
 
 
 def test_segment_uses_the_worse_endpoint():

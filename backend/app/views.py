@@ -49,7 +49,7 @@ class AnalyzeView(APIView):
 
             payload = run(request.data, get_provider(), OpenMeteoClient(cache=cache))
         except AnalyzeError as exc:
-            return _error(exc.code, exc.message, exc.status)
+            return _error(exc.code, exc.message, exc.status, exc.upstream_status)
         return Response(payload)
 
 
@@ -92,5 +92,8 @@ def geocode(query: str, client: httpx.Client | None = None) -> list[dict]:
     return places
 
 
-def _error(code: str, message: str, status: int) -> Response:
-    return Response({"error": {"code": code, "message": message}}, status=status)
+def _error(code: str, message: str, status: int, upstream_status: int | None = None) -> Response:
+    error = {"code": code, "message": message}
+    if upstream_status is not None:
+        error["upstream_status"] = upstream_status
+    return Response({"error": error}, status=status)

@@ -47,6 +47,45 @@ def test_parse_forecast_converts_cm_and_keeps_inches():
     assert series.gust == [40, 55]
 
 
+def test_failed_chunk_does_not_drop_successful_points():
+    def handler(request: httpx.Request) -> httpx.Response:
+        lats = request.url.params["latitude"].split(",")
+        if lats[0].startswith("10"):
+            return httpx.Response(500, json={"error": "no"})
+        body = [
+            {
+                "hourly_units": {"snowfall": "inch"},
+                "hourly": {
+                    "time": [1_700_000_000],
+                    "wind_speed_10m": [8],
+                    "wind_gusts_10m": [9],
+                    "rain": [0],
+                    "snowfall": [0],
+                },
+            }
+            for _ in lats
+        ]
+        payload = body[0] if len(body) == 1 else body
+        return httpx.Response(200, json=payload)
+
+    client = OpenMeteoClient(cache=None, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client.calls = 0
+    start = datetime(2026, 11, 16, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    # Force two chunks by patching the chunk size for this call.
+    import app.weather as weather_module
+
+    original = weather_module.CHUNK
+    weather_module.CHUNK = 1
+    try:
+        found = client.fetch([(41.88, -87.63), (10.0, 10.0)], start, end)
+    finally:
+        weather_module.CHUNK = original
+    assert (41.88, -87.63) in found
+    assert (10.0, 10.0) in client.failed_points
+    assert client.calls == 4  # one success plus three attempts on the failure
+
+
 def test_client_batches_and_caches():
     calls = {"n": 0}
 

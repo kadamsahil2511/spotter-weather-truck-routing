@@ -8,8 +8,12 @@ from app.geo import haversine
 from app.routing import (
     FixtureProvider,
     OrsProvider,
+    RoutingUnavailable,
     decode_polyline,
+    drop_long_detours,
+    line_route,
     ors_body,
+    ors_directions_url,
     parse_ors,
     parse_osrm,
     share_fraction,
@@ -17,6 +21,52 @@ from app.routing import (
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "ors_sample.json"
+
+
+def test_ors_directions_url_includes_openrouteservice_prefix(monkeypatch):
+    monkeypatch.delenv("ORS_BASE_URL", raising=False)
+    assert (
+        ors_directions_url()
+        == "https://api.heigit.org/openrouteservice/v2/directions/driving-hgv"
+    )
+    monkeypatch.setenv("ORS_BASE_URL", "https://api.openrouteservice.org")
+    assert ors_directions_url() == "https://api.openrouteservice.org/v2/directions/driving-hgv"
+    assert ors_directions_url("https://example.test/ors/") == "https://example.test/ors/v2/directions/driving-hgv"
+
+
+def test_ors_http_error_is_routing_unavailable_not_no_route():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/v2/directions/driving-hgv")
+        assert "secret-key" not in (request.url.params.get("api_key") or "")
+        return httpx.Response(401, json={"error": "Invalid API key: secret-key"})
+
+    provider = OrsProvider("secret-key", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(RoutingUnavailable) as caught:
+        provider.routes((-87.63, 41.88), (-90.2, 38.63), 20000)
+    assert caught.value.status == 401
+    assert "401" in str(caught.value)
+
+
+def test_via_more_than_40_percent_longer_is_dropped():
+    direct = line_route(
+        [(-90.0, 40.0), (-90.0, 41.0)],
+        mph=55,
+        provider="ors-hgv",
+        truck_profile=True,
+        warnings=[],
+        kind="direct",
+    )
+    long = line_route(
+        [(-90.0, 40.0), (-88.0, 40.5), (-90.0, 41.0)],
+        mph=50,
+        provider="ors-hgv",
+        truck_profile=True,
+        warnings=[],
+        kind="via",
+        via=(-88.0, 40.5),
+    )
+    kept = drop_long_detours([direct, long])
+    assert [route.kind for route in kept] == ["direct"]
 
 
 def test_polyline_precision_5_known_vector():

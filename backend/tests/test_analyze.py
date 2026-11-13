@@ -35,6 +35,22 @@ def test_gust_is_display_only_and_no_travel_does_not_change_the_sort():
     assert storm["heatmap"]["levels"][0][0] == 4
 
 
+def test_summary_miles_match_displayed_distance():
+    result = run(_payload(load_lb=20000), FixtureProvider(), FlatWeather(10), now=NOW)
+    for route in result["routes"]:
+        summary = route["summary"]
+        total = (
+            summary["low_mi"]
+            + summary["moderate_mi"]
+            + summary["high_mi"]
+            + summary["severe_mi"]
+            + summary["no_travel_mi"]
+            + summary["unknown_mi"]
+        )
+        assert total == pytest.approx(route["distance_mi"])
+        assert route["checkpoints"][-1]["mile"] == pytest.approx(route["distance_mi"])
+
+
 def test_departure_window_and_same_place():
     with pytest.raises(AnalyzeError) as caught:
         run(_payload(departure="2020-01-01T00:00"), FixtureProvider(), FlatWeather(10), now=NOW)

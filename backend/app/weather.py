@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -165,9 +167,10 @@ def parse_forecast(body: dict | list, count: int) -> list[Series]:
 class OpenMeteoClient:
     def __init__(self, cache=None, client: httpx.Client | None = None) -> None:
         self.cache = cache if isinstance(cache, SafeCache) else SafeCache(cache)
-        self.client = client or httpx.Client(timeout=10.0)
+        self.client = client or httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0))
         self.calls = 0
         self.cache_hits = 0
+        self.failed_points: list[tuple[float, float]] = []
 
     def fetch(
         self,
@@ -175,6 +178,7 @@ class OpenMeteoClient:
         start: datetime,
         end: datetime,
     ) -> dict[tuple[float, float], Series]:
+        self.failed_points = []
         unique: list[tuple[float, float]] = []
         seen: set[tuple[float, float]] = set()
         for lat, lon in points:
@@ -197,13 +201,29 @@ class OpenMeteoClient:
                 found[point] = _as_series(payload)
             else:
                 missing.append(point)
+        chunks = [missing[offset : offset + CHUNK] for offset in range(0, len(missing), CHUNK)]
         fresh: dict[str, dict] = {}
-        for offset in range(0, len(missing), CHUNK):
-            chunk = missing[offset : offset + CHUNK]
-            parsed = self._fetch_chunk(chunk, start_s, end_s)
-            for point, series in zip(chunk, parsed):
-                found[point] = series
-                fresh[_cache_key(point[0], point[1], start_s, end_s)] = _from_series(series)
+        if chunks:
+            workers = min(4, len(chunks))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._fetch_chunk, chunk, start_s, end_s): chunk for chunk in chunks
+                }
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    try:
+                        parsed = future.result()
+                    except Exception as exc:
+                        logger.warning(
+                            "open-meteo chunk failed (%s points): %s",
+                            len(chunk),
+                            exc,
+                        )
+                        self.failed_points.extend(chunk)
+                        continue
+                    for point, series in zip(chunk, parsed):
+                        found[point] = series
+                        fresh[_cache_key(point[0], point[1], start_s, end_s)] = _from_series(series)
         if fresh:
             self.cache.set_many(fresh, TTL_SECONDS)
         return found
@@ -220,22 +240,32 @@ class OpenMeteoClient:
             "start_hour": start,
             "end_hour": end,
         }
-        response = None
-        for attempt in (1, 2):
+        delay = 0.2
+        last_error: Exception | None = None
+        for attempt in range(3):
             self.calls += 1
             try:
                 response = self.client.get(OPEN_METEO_URL, params=params)
-            except httpx.HTTPError:
-                logger.warning("open-meteo request failed", exc_info=True)
+            except httpx.HTTPError as exc:
+                last_error = exc
                 if attempt == 2:
                     raise
+                time.sleep(delay)
+                delay *= 2
                 continue
-            if response.status_code in (429, 502, 503, 504) and attempt == 1:
-                continue
-            break
-        assert response is not None
-        response.raise_for_status()
-        return parse_forecast(response.json(), len(points))
+            if response.status_code >= 500 or response.status_code == 429:
+                if attempt < 2:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+            if response.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"open-meteo HTTP {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+            return parse_forecast(response.json(), len(points))
+        raise last_error or RuntimeError("open-meteo failed")
 
 
 def _hour_stamp(moment: datetime) -> str:

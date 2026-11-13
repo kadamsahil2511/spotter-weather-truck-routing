@@ -151,6 +151,81 @@ def _avg_key(summary: Summary) -> float:
     return round(summary.avg_risk, 2)
 
 
+def align_display(
+    levels: list[str], raw_miles: list[float], target: float
+) -> tuple[list[float], Summary]:
+    """Scale checkpoint miles onto the displayed route distance.
+
+    Segment tenths are rounded, and the last segment absorbs the remainder so
+    the summary buckets add up to `target` exactly.
+    """
+    target = round(float(target), 1)
+    tenths_target = int(round(target * 10))
+    if len(levels) < 2 or len(raw_miles) < 2 or tenths_target <= 0:
+        miles = [0.0] if raw_miles else []
+        if miles and tenths_target > 0:
+            miles = [0.0, target][: max(len(raw_miles), 1)]
+            if len(miles) == 1:
+                miles = [target]
+        summary = Summary(
+            no_travel_mi=0.0,
+            severe_mi=0.0,
+            high_mi=0.0,
+            moderate_mi=0.0,
+            low_mi=target if tenths_target else 0.0,
+            unknown_mi=0.0,
+            avg_risk=1.0 if tenths_target else None,
+            incomplete=False,
+        )
+        return miles or [target], summary
+
+    spans = [max(0.0, raw_miles[index + 1] - raw_miles[index]) for index in range(len(raw_miles) - 1)]
+    segment_levels: list[str] = []
+    for index, _span in enumerate(spans):
+        left, right = levels[index], levels[index + 1]
+        if left == "unknown" or right == "unknown":
+            segment_levels.append("unknown")
+        else:
+            segment_levels.append(worse(left, right))
+    total = sum(spans)
+    if total <= 1e-9:
+        floors = [0 for _ in spans]
+        floors[-1] = tenths_target
+    else:
+        floors = [int(round(span / total * tenths_target)) for span in spans]
+        floors[-1] += tenths_target - sum(floors)
+        cursor = len(floors) - 1
+        while floors[cursor] < 0 and cursor > 0:
+            floors[cursor - 1] += floors[cursor]
+            floors[cursor] = 0
+            cursor -= 1
+    miles = [0.0]
+    accumulated = 0
+    for tenth in floors:
+        accumulated += tenth
+        miles.append(accumulated / 10.0)
+    buckets = {level: 0.0 for level in LEVELS}
+    unknown = 0.0
+    for level, tenth in zip(segment_levels, floors):
+        amount = tenth / 10.0
+        if level == "unknown":
+            unknown += amount
+        else:
+            buckets[level] += amount
+    known = sum(buckets.values())
+    average = None if known <= 1e-9 else sum(SCORE[level] * buckets[level] for level in LEVELS) / known
+    return miles, Summary(
+        no_travel_mi=buckets["no_travel"],
+        severe_mi=buckets["severe"],
+        high_mi=buckets["high"],
+        moderate_mi=buckets["moderate"],
+        low_mi=buckets["low"],
+        unknown_mi=unknown,
+        avg_risk=average,
+        incomplete=unknown > 0.05,
+    )
+
+
 def recommend(routes: list[Ranked]) -> Recommendation | None:
     """Brief order, then id. Routes with no classifiable miles stay out when any route has data."""
     usable = [route for route in routes if route.summary.known_mi > 0.05]

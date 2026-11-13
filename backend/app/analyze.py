@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -11,26 +12,35 @@ from app.risk import (
     LEVEL_INDEX,
     Ranked,
     Summary,
+    align_display,
     apply_load,
     classify_rain,
     classify_snow,
     combine,
     recommend,
-    summarize_segments,
 )
 from app.routing import RouteOption, RoutingUnavailable
 from app.sampling import Placed, place_checkpoints
 from app.weather import Series, match_series, overall_match, round_latlon
 
 DISPLAY_EPSILON_MI = 0.05
+logger = logging.getLogger(__name__)
 
 
 class AnalyzeError(Exception):
-    def __init__(self, code: str, message: str, status: int) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status: int,
+        *,
+        upstream_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        self.upstream_status = upstream_status
 
 
 def run(payload: dict, provider, weather, now: datetime | None = None) -> dict:
@@ -45,7 +55,12 @@ def run(payload: dict, provider, weather, now: datetime | None = None) -> dict:
             load_lb,
         )
     except RoutingUnavailable as exc:
-        raise AnalyzeError("routing_unavailable", str(exc), 503) from exc
+        raise AnalyzeError(
+            "routing_unavailable",
+            str(exc),
+            503,
+            upstream_status=exc.status,
+        ) from exc
     if not routes:
         raise AnalyzeError("no_route", "No drivable route was found between those points.", 422)
 
@@ -95,14 +110,28 @@ def run(payload: dict, provider, weather, now: datetime | None = None) -> dict:
     series: dict[tuple[float, float], Series] = {}
     try:
         series = weather.fetch(fetch_points, window_start, window_end)
-    except Exception:
+    except Exception as exc:
+        logger.warning("weather fetch failed: %s", exc)
         warnings.append("weather_unavailable")
+    failed_points = getattr(weather, "failed_points", None) or []
+    if failed_points and not series:
+        if "weather_unavailable" not in warnings:
+            warnings.append("weather_unavailable")
+    elif failed_points:
+        warnings.append("weather_partial")
 
     built = []
     ranked: list[Ranked] = []
     for route, placed, _total in prepared:
         checkpoints = [_checkpoint(point, series, load_lb) for point in placed]
-        summary = summarize_segments([(item["risk"]["level"], item["mile"]) for item in checkpoints])
+        target_mi = round(route.distance_m / METERS_PER_MILE, 1)
+        aligned, summary = align_display(
+            [item["risk"]["level"] for item in checkpoints],
+            [point.mile for point in placed],
+            target_mi,
+        )
+        for item, mile in zip(checkpoints, aligned):
+            item["mile"] = mile
         if summary.no_travel_mi > 0.05 and "no_travel" not in route.warnings:
             route.warnings.append("no_travel")
         built.append((route, checkpoints, summary))

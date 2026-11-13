@@ -41,7 +41,7 @@ Confirmed in review, and not open for reinterpretation:
 
 Why not the other two. The product is a truck with a load weight. A car profile will send it down roads the weight restriction was supposed to avoid, and the public OSRM server is a demo (about 1 request/second, no uptime promise, a `User-Agent` is required). GraphHopper’s truck profiles are not on the free plan, so it has the same functional gap as OSRM plus a smaller quota.
 
-Use the current host `https://api.heigit.org`. `api.openrouteservice.org` is deprecated and was scheduled to shut down in early November 2026; its quota was already cut to 10%.
+Directions URL is `https://api.heigit.org/openrouteservice/v2/directions/driving-hgv`. Override the host with `ORS_BASE_URL`. Fallback host: `https://api.openrouteservice.org` (same `/v2/directions/driving-hgv` suffix). The bare `https://api.heigit.org/v2/...` path 404s.
 
 ### Guaranteeing three options
 

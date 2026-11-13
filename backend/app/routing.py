@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import httpx
@@ -19,16 +23,28 @@ from app.geo import (
 
 logger = logging.getLogger(__name__)
 
-ORS_URL = "https://api.heigit.org/v2/directions/driving-hgv"
+DEFAULT_ORS_BASE_URL = "https://api.heigit.org/openrouteservice"
+# Deprecated host. Set ORS_BASE_URL to this if the HeiGIT path is unreachable.
+FALLBACK_ORS_BASE_URL = "https://api.openrouteservice.org"
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
 USER_AGENT = "truck-weather-routes/0.1"
 TARE_LB = 35_000
 KM_PER_MILE = 1.609344
 SHORT_HAUL_KM = 90.0
+DETOUR_LIMIT = 1.4
+
+
+def ors_directions_url(base: str | None = None) -> str:
+    """POST target for driving-hgv. Default includes the /openrouteservice prefix."""
+    root = base if base is not None else os.environ.get("ORS_BASE_URL", "")
+    root = root.strip() or DEFAULT_ORS_BASE_URL
+    return f"{root.rstrip('/')}/v2/directions/driving-hgv"
 
 
 class RoutingUnavailable(Exception):
-    pass
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass
@@ -255,6 +271,21 @@ def _slug(label: str) -> str:
     return cleaned.strip("-") or "route"
 
 
+def drop_long_detours(routes: list[RouteOption]) -> list[RouteOption]:
+    """Drop via options more than 40% longer than the best non-via route."""
+    if not routes:
+        return []
+    anchors = [route for route in routes if route.kind != "via"] or routes
+    best = min(route.distance_m for route in anchors)
+    if best <= 0:
+        return routes
+    return [
+        route
+        for route in routes
+        if route.kind != "via" or route.distance_m <= best * DETOUR_LIMIT
+    ]
+
+
 def assign_labels(routes: list[RouteOption]) -> list[RouteOption]:
     if routes and all(route.kind == "alternative" for route in routes):
         routes = sorted(routes, key=lambda route: (route.duration_s, route.distance_m))
@@ -358,28 +389,32 @@ class FixtureProvider:
                     via=via,
                 )
             )
-        return assign_labels(dedupe(routes))
+        return assign_labels(drop_long_detours(dedupe(routes)))
 
 
 class _HttpRoutes:
     def __init__(self, client: httpx.Client | None = None) -> None:
-        self.client = client or httpx.Client(timeout=10.0)
+        self.client = client or httpx.Client(timeout=httpx.Timeout(20.0, connect=5.0))
         self.calls = 0
+        self._lock = threading.Lock()
 
     def _send(self, request: httpx.Request) -> httpx.Response:
         response = None
         last_error: Exception | None = None
         for attempt in (1, 2):
-            self.calls += 1
+            with self._lock:
+                self.calls += 1
             try:
                 response = self.client.send(request)
             except httpx.HTTPError as exc:
                 last_error = exc
-                logger.warning("routing request failed", exc_info=True)
+                logger.warning("routing request failed: %s", exc.__class__.__name__)
                 if attempt == 2:
                     raise RoutingUnavailable("The routing provider did not respond.") from exc
+                time.sleep(0.2)
                 continue
             if response.status_code in (429, 502, 503, 504) and attempt == 1:
+                time.sleep(0.2)
                 continue
             return response
         if response is not None:
@@ -388,9 +423,11 @@ class _HttpRoutes:
 
 
 class OrsProvider(_HttpRoutes):
-    def __init__(self, api_key: str, client: httpx.Client | None = None) -> None:
+    def __init__(self, api_key: str, client: httpx.Client | None = None, base_url: str | None = None) -> None:
         super().__init__(client)
         self.api_key = api_key
+        self.base_url = base_url
+        self.last_status: int | None = None
 
     def routes(
         self, origin: tuple[float, float], destination: tuple[float, float], load_lb: float
@@ -400,9 +437,16 @@ class OrsProvider(_HttpRoutes):
         if not routes:
             routes, failed = self._collect(origin, destination, load_lb, restrictions=False)
             relaxed = True
+        routes = drop_long_detours(routes)
         if not routes:
-            if failed:
-                raise RoutingUnavailable("OpenRouteService did not return a route.")
+            if failed or self.last_status:
+                status = self.last_status
+                message = (
+                    f"OpenRouteService returned HTTP {status}."
+                    if status
+                    else "OpenRouteService did not return a route."
+                )
+                raise RoutingUnavailable(message, status=status)
             return []
         if relaxed:
             for route in routes:
@@ -442,24 +486,19 @@ class OrsProvider(_HttpRoutes):
         if not found:
             return [], failed
         base = next((route for route in found if route.kind == "direct"), found[0])
-        for fraction in (0.5, 0.35):
+        best = base.distance_m
+        vias: list[tuple[float, float]] = []
+        for fraction in (0.3, 0.7, 0.5):
+            left, right, _mid = lateral_vias(base.coordinates, fraction)
+            vias.extend((left, right))
+        for offset in range(0, len(vias), 3):
             if len(found) >= 3:
                 break
-            left, right, _ = lateral_vias(base.coordinates, fraction)
-            for via in (left, right):
-                extra, ok = self._fetch(
-                    [origin, via, destination],
-                    load_lb,
-                    alternatives=False,
-                    restrictions=restrictions,
-                    preference="recommended",
-                    kind="via",
-                    via=via,
-                )
+            group = vias[offset : offset + 3]
+            for extra, ok in self._fetch_vias(origin, destination, load_lb, restrictions, group):
                 failed = failed or not ok
-                found = dedupe(found + extra)
-                if len(found) >= 3:
-                    break
+                acceptable = [route for route in extra if route.distance_m <= best * DETOUR_LIMIT]
+                found = dedupe(found + acceptable)
         if len(found) < 3:
             extra, ok = self._fetch(
                 [origin, destination],
@@ -471,7 +510,28 @@ class OrsProvider(_HttpRoutes):
             )
             failed = failed or not ok
             found = dedupe(found + extra)
+        found = drop_long_detours(found)
         return found[:3], failed
+
+    def _fetch_vias(self, origin, destination, load_lb, restrictions, vias):
+        jobs = []
+        with ThreadPoolExecutor(max_workers=min(3, len(vias))) as pool:
+            futures = [
+                pool.submit(
+                    self._fetch,
+                    [origin, via, destination],
+                    load_lb,
+                    alternatives=False,
+                    restrictions=restrictions,
+                    preference="recommended",
+                    kind="via",
+                    via=via,
+                )
+                for via in vias
+            ]
+            for future in futures:
+                jobs.append(future.result())
+        return jobs
 
     def _fetch(
         self,
@@ -493,7 +553,7 @@ class OrsProvider(_HttpRoutes):
         )
         request = httpx.Request(
             "POST",
-            ORS_URL,
+            ors_directions_url(self.base_url),
             json=body,
             headers={
                 "Authorization": self.api_key,
@@ -505,16 +565,24 @@ class OrsProvider(_HttpRoutes):
             response = self._send(request)
         except RoutingUnavailable:
             return [], False
-        if response.status_code >= 500 or response.status_code == 429:
-            return [], False
-        if response.status_code >= 400:
-            logger.info("ors returned %s", response.status_code)
+        if response.status_code == 400:
+            self._log_ors(response)
             return [], True
+        if response.status_code >= 400:
+            self._log_ors(response)
+            self.last_status = response.status_code
+            return [], False
         routes = parse_ors(response.json(), truck_profile=restrictions)
         for route in routes:
             route.kind = kind
             route.via = via
         return routes, True
+
+    def _log_ors(self, response: httpx.Response) -> None:
+        body = response.text[:500].replace("\n", " ")
+        if self.api_key:
+            body = body.replace(self.api_key, "[redacted]")
+        logger.warning("ORS HTTP %s: %s", response.status_code, body)
 
 
 class OsrmProvider(_HttpRoutes):

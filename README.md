@@ -2,7 +2,7 @@
 
 React + Django PWA that ranks three truck routes by the Spotter weather rules. The design notes are in [PLAN.md](./PLAN.md).
 
-Routing is OpenRouteService `driving-hgv` when `ORS_API_KEY` is set. Without that key the API still runs, using a labeled straight-line fixture so the rest of the pipeline can be tested. The key is never committed.
+Routing is OpenRouteService `driving-hgv` when `ORS_API_KEY` is set. Requests go to `ORS_BASE_URL` (default `https://api.heigit.org/openrouteservice`, so the directions path is `/openrouteservice/v2/directions/driving-hgv`). If that host is unreachable, set `ORS_BASE_URL=https://api.openrouteservice.org`. Without a key the API still runs, using a labeled straight-line fixture so the rest of the pipeline can be tested. The key is never committed.
 
 ## API
 
