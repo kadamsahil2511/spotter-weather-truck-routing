@@ -4,7 +4,7 @@ import pytest
 from rest_framework.test import APIRequestFactory
 
 from app.analyze import AnalyzeError, run
-from app.routing import FixtureProvider
+from app.routing import FixtureProvider, PointNotRoutable
 from app.views import AnalyzeView, HealthView
 from app.weather import Series
 
@@ -33,6 +33,18 @@ def test_gust_is_display_only_and_no_travel_does_not_change_the_sort():
     assert storm["heatmap"]["hour_count"] == 49
     assert len(storm["heatmap"]["levels"]) == 49
     assert storm["heatmap"]["levels"][0][0] == 4
+
+
+def test_unroutable_point_is_422():
+    class SnapMiss(FixtureProvider):
+        def routes(self, origin, destination, load_lb):
+            raise PointNotRoutable("origin")
+
+    with pytest.raises(AnalyzeError) as caught:
+        run(_payload(), SnapMiss(), FlatWeather(10), now=NOW)
+    assert caught.value.code == "point_not_routable"
+    assert caught.value.status == 422
+    assert "origin" in caught.value.message
 
 
 def test_summary_miles_match_displayed_distance():

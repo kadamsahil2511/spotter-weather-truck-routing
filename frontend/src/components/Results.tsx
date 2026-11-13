@@ -76,7 +76,7 @@ export function Results({
                 </Card.Header>
                 <Card.Content className="p-0 pt-2 text-sm">
                   <p>
-                    {formatDuration(route.duration_s)} · {route.distance_mi.toFixed(1)} mi
+                    Time {formatDuration(route.duration_s)} · Distance {route.distance_mi.toFixed(1)} miles
                   </p>
                   <p>
                     Severe {route.summary.severe_mi.toFixed(1)} mi · High {route.summary.high_mi.toFixed(1)} mi

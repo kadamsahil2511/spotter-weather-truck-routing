@@ -19,7 +19,7 @@ from app.risk import (
     combine,
     recommend,
 )
-from app.routing import RouteOption, RoutingUnavailable
+from app.routing import PointNotRoutable, RouteOption, RoutingUnavailable
 from app.sampling import Placed, place_checkpoints
 from app.weather import Series, match_series, overall_match, round_latlon
 
@@ -54,6 +54,8 @@ def run(payload: dict, provider, weather, now: datetime | None = None) -> dict:
             (destination["lon"], destination["lat"]),
             load_lb,
         )
+    except PointNotRoutable as exc:
+        raise AnalyzeError("point_not_routable", str(exc), 422) from exc
     except RoutingUnavailable as exc:
         raise AnalyzeError(
             "routing_unavailable",

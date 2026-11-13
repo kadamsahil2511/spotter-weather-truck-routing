@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +46,14 @@ class RoutingUnavailable(Exception):
     def __init__(self, message: str, *, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+class PointNotRoutable(Exception):
+    """Origin or destination cannot be snapped to the road network."""
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+        super().__init__(f"The {endpoint} is not near a road the router can use.")
 
 
 @dataclass
@@ -111,6 +120,7 @@ def ors_body(
     alternatives: bool,
     restrictions: bool,
     preference: str,
+    radiuses: list[float] | None = None,
 ) -> dict:
     body: dict = {
         "coordinates": [[lon, lat] for lon, lat in coordinates],
@@ -131,7 +141,36 @@ def ors_body(
             "share_factor": 0.6,
             "weight_factor": 1.4,
         }
+    if radiuses is not None:
+        body["radiuses"] = radiuses
     return body
+
+
+def ors_error_code(response: httpx.Response) -> int | None:
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict) and error.get("code") is not None:
+        try:
+            return int(error["code"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def snap_endpoint(body: str) -> str:
+    """ORS names the failing coordinate. Index 0 is the origin, 1 the destination."""
+    match = re.search(r"coordinate\s+(\d+)", body)
+    if not match:
+        return "origin or destination"
+    index = int(match.group(1))
+    if index == 0:
+        return "origin"
+    if index == 1:
+        return "destination"
+    return "origin or destination"
 
 
 def parse_ors(payload: dict, *, truck_profile: bool) -> list[RouteOption]:
@@ -303,7 +342,7 @@ def assign_labels(routes: list[RouteOption]) -> list[RouteOption]:
         if route.kind == "via" and route.via is not None:
             label = f"Via {side_name(route.via, midpoint)}"
         elif route.kind == "shortest":
-            label = "Shortest"
+            label = "Shortest distance"
         elif route.kind == "direct":
             label = "Direct"
         else:
@@ -543,6 +582,7 @@ class OrsProvider(_HttpRoutes):
         preference: str,
         kind: str,
         via: tuple[float, float] | None = None,
+        radiuses: list[float] | None = None,
     ) -> tuple[list[RouteOption], bool]:
         body = ors_body(
             coordinates,
@@ -550,6 +590,7 @@ class OrsProvider(_HttpRoutes):
             alternatives=alternatives,
             restrictions=restrictions,
             preference=preference,
+            radiuses=radiuses,
         )
         request = httpx.Request(
             "POST",
@@ -565,6 +606,18 @@ class OrsProvider(_HttpRoutes):
             response = self._send(request)
         except RoutingUnavailable:
             return [], False
+        if ors_error_code(response) == 2010:
+            return self._handle_snap_miss(
+                response,
+                coordinates,
+                load_lb,
+                alternatives=alternatives,
+                restrictions=restrictions,
+                preference=preference,
+                kind=kind,
+                via=via,
+                radiuses=radiuses,
+            )
         if response.status_code == 400:
             self._log_ors(response)
             return [], True
@@ -577,6 +630,40 @@ class OrsProvider(_HttpRoutes):
             route.kind = kind
             route.via = via
         return routes, True
+
+    def _handle_snap_miss(
+        self,
+        response: httpx.Response,
+        coordinates,
+        load_lb: float,
+        *,
+        alternatives: bool,
+        restrictions: bool,
+        preference: str,
+        kind: str,
+        via: tuple[float, float] | None,
+        radiuses: list[float] | None,
+    ) -> tuple[list[RouteOption], bool]:
+        """2010 means the pin is off the road. Widen origin/destination; skip a via."""
+        if kind == "via" or len(coordinates) != 2:
+            return [], True
+        current = 0 if not radiuses else max(radiuses)
+        for radius in (2000, 5000):
+            if current >= radius:
+                continue
+            routes, ok = self._fetch(
+                coordinates,
+                load_lb,
+                alternatives=alternatives,
+                restrictions=restrictions,
+                preference=preference,
+                kind=kind,
+                via=via,
+                radiuses=[float(radius), float(radius)],
+            )
+            if routes or not ok:
+                return routes, ok
+        raise PointNotRoutable(snap_endpoint(response.text))
 
     def _log_ors(self, response: httpx.Response) -> None:
         body = response.text[:500].replace("\n", " ")

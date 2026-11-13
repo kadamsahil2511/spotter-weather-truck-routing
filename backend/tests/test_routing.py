@@ -8,7 +8,9 @@ from app.geo import haversine
 from app.routing import (
     FixtureProvider,
     OrsProvider,
+    PointNotRoutable,
     RoutingUnavailable,
+    assign_labels,
     decode_polyline,
     drop_long_detours,
     line_route,
@@ -171,6 +173,114 @@ def test_ors_provider_falls_back_to_vias_when_alternatives_are_rejected(monkeypa
     assert routes
     assert provider.calls >= 2
     assert all(route.provider == "ors-hgv" for route in routes)
+
+
+def test_shortest_preference_is_labeled_by_distance():
+    route = line_route(
+        [(-90.0, 40.0), (-90.0, 41.0)],
+        mph=40,
+        provider="ors-hgv",
+        truck_profile=True,
+        warnings=[],
+        kind="shortest",
+    )
+    direct = line_route(
+        [(-90.0, 40.0), (-90.2, 41.0)],
+        mph=55,
+        provider="ors-hgv",
+        truck_profile=True,
+        warnings=[],
+        kind="direct",
+    )
+    labeled = assign_labels([direct, route])
+    assert any(item.label == "Shortest distance" for item in labeled)
+
+
+def test_unroutable_pin_retries_wider_radiuses_then_names_the_endpoint():
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body.get("radiuses"))
+        if body.get("radiuses") == [5000.0, 5000.0] or body.get("radiuses") == [5000, 5000]:
+            geometry = _tiny_polyline(body["coordinates"])
+            return httpx.Response(
+                200,
+                json={
+                    "routes": [
+                        {
+                            "summary": {"distance": 8000, "duration": 600},
+                            "geometry": geometry,
+                            "segments": [
+                                {"steps": [{"distance": 8000, "duration": 600, "way_points": [0, 1]}]}
+                            ],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            404,
+            json={
+                "error": {
+                    "code": 2010,
+                    "message": "Could not find routable point within a radius of 350.0 meters of specified coordinate 0: -106.3 42.8.",
+                }
+            },
+        )
+
+    provider = OrsProvider("test-key", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    routes = provider.routes((-106.31, 42.85), (-106.25, 42.90), 20000)
+    assert routes
+    assert [2000.0, 2000.0] in seen
+    assert [5000.0, 5000.0] in seen
+
+
+def test_unroutable_destination_raises_after_both_radiuses():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={
+                "error": {
+                    "code": 2010,
+                    "message": "Could not find routable point within a radius of 5000.0 meters of specified coordinate 1: -106.3 42.8.",
+                }
+            },
+        )
+
+    provider = OrsProvider("test-key", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(PointNotRoutable) as caught:
+        provider.routes((-106.31, 42.85), (-106.25, 42.90), 20000)
+    assert caught.value.endpoint == "destination"
+
+
+def test_via_snap_miss_is_skipped():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if len(body["coordinates"]) > 2:
+            return httpx.Response(
+                404,
+                json={"error": {"code": 2010, "message": "specified coordinate 1: -90 40."}},
+            )
+        geometry = _tiny_polyline(body["coordinates"])
+        return httpx.Response(
+            200,
+            json={
+                "routes": [
+                    {
+                        "summary": {"distance": 400000, "duration": 18000},
+                        "geometry": geometry,
+                        "segments": [
+                            {"steps": [{"distance": 400000, "duration": 18000, "way_points": [0, 1]}]}
+                        ],
+                    }
+                ]
+            },
+        )
+
+    provider = OrsProvider("test-key", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    routes = provider.routes((-87.6298, 41.8781), (-90.1994, 38.627), 32000)
+    assert any(route.label == "Direct" for route in routes)
+    assert all(route.kind != "via" for route in routes)
 
 
 def _tiny_polyline(coords):

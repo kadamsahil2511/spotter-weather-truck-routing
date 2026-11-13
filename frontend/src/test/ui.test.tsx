@@ -22,6 +22,7 @@ describe("results", () => {
   it("shows the recommendation sentence and the no-travel warning", () => {
     render(<Results result={sampleResult} selectedId="direct" onSelect={() => undefined} />);
     expect(screen.getByText("direct has 0 severe miles versus 18 on via-east.")).toBeInTheDocument();
+    expect(screen.getByText("Time 2 h 0 min · Distance 100.0 miles")).toBeInTheDocument();
     expect(screen.getByText(/No Travel miles on Direct/)).toBeInTheDocument();
     expect(screen.getByText(/still follows the brief/)).toBeInTheDocument();
   });

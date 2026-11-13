@@ -74,7 +74,7 @@ Decode the polyline at precision 5 (1e5), not polyline6. Each step’s `way_poin
 2. Walk the direct geometry to 50% of its length. Bearing of the local segment, then two points  `d` miles to the left and right of travel. `d = clamp(0.12 * length_mi, 10, 40)`.
 3. Two more calls: origin → via → destination.
 4. A route is a duplicate when more than 85% of its 5-mile sample points lie within 1 mile of another route. Replace a duplicate by moving the via to 30% and 70% of the length, once. If still short, one call with `preference: "shortest"` and no via.
-5. Keep at most three, shortest duration first, after the duplicate filter. Label them from how they were built: `Direct`, `Via east` / `Via west` (whichever axis actually separates the via point; use north/south when the longitude delta is the small one), or `Shortest` for the preference variant.
+5. Keep at most three, shortest duration first, after the duplicate filter. Label them from how they were built: `Direct`, `Via east` / `Via west` (whichever axis actually separates the via point; use north/south when the longitude delta is the small one), or `Shortest distance` for the preference variant. That option can take longer than the direct route; the card shows both time and miles.
 6. If the engine returns one or two, respond **200** with `warnings: ["partial_routes"]`. Do not invent a third line.
 
 **Weight sent to ORS is not the cargo weight.** ORS `weight` is the vehicle, in metric tons. Assumption, printed in the UI footer and the response: tare **35,000 lb** (tractor + empty trailer) plus the entered load.
