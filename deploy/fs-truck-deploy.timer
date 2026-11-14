@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for a green fs-truck deploy every 2 minutes
+
+[Timer]
+OnActiveSec=2min
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Persistent=true
+Unit=fs-truck-deploy.service
+
+[Install]
+WantedBy=timers.target

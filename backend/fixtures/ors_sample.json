@@ -1,0 +1,20 @@
+{
+  "routes": [
+    {
+      "summary": {"distance": 1000.0, "duration": 60.0},
+      "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+      "segments": [
+        {
+          "steps": [
+            {
+              "distance": 1000.0,
+              "duration": 60.0,
+              "way_points": [0, 2],
+              "instruction": "Head north"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

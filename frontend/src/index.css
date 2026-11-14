@@ -1,0 +1,130 @@
+@layer theme, base, components, utilities;
+
+@import "tailwindcss";
+@source "../src/**/*.{ts,tsx}";
+
+@import "@heroui/styles/variants";
+@import "@heroui/styles/utilities";
+@import "tw-animate-css";
+@import "@heroui/styles/base/base.css" layer(base);
+@import "@heroui/styles/base/scrollbar.css" layer(base);
+@import "@heroui/styles/themes/shared/theme.css";
+@import "@heroui/styles/themes/default/variables.css" layer(theme);
+@import "@heroui/styles/components/label.css" layer(components);
+@import "@heroui/styles/components/description.css" layer(components);
+@import "@heroui/styles/components/field-error.css" layer(components);
+@import "@heroui/styles/components/button.css" layer(components);
+@import "@heroui/styles/components/chip.css" layer(components);
+@import "@heroui/styles/components/alert.css" layer(components);
+@import "@heroui/styles/components/card.css" layer(components);
+@import "@heroui/styles/components/tabs.css" layer(components);
+@import "@heroui/styles/components/slider.css" layer(components);
+@import "@heroui/styles/components/input.css" layer(components);
+@import "@heroui/styles/components/number-field.css" layer(components);
+@import "@heroui/styles/components/combo-box.css" layer(components);
+@import "@heroui/styles/components/list-box.css" layer(components);
+@import "@heroui/styles/components/popover.css" layer(components);
+@import "@heroui/styles/components/drawer.css" layer(components);
+@import "@heroui/styles/components/header.css" layer(components);
+@import "@heroui/styles/components/scroll-shadow.css" layer(components);
+@import "@heroui/styles/components/date-field.css" layer(components);
+@import "@heroui/styles/components/date-input-group.css" layer(components);
+@import "@heroui/styles/components/time-field.css" layer(components);
+@import "@heroui/styles/components/skeleton.css" layer(components);
+@import "@heroui/styles/components/progress-bar.css" layer(components);
+@import "@heroui/styles/components/surface.css" layer(components);
+@import "@heroui/styles/components/disclosure.css" layer(components);
+@import "@heroui/styles/components/toggle-button.css" layer(components);
+@import "@heroui/styles/components/toggle-button-group.css" layer(components);
+
+:root,
+[data-theme="light"] {
+  --accent: #1c1917;
+  --accent-foreground: #fafaf9;
+  --background: #fafaf9;
+  --foreground: #1c1917;
+  --surface: #ffffff;
+  --surface-foreground: #1c1917;
+  --default: #f5f5f4;
+  --default-foreground: #1c1917;
+  --link: #1c1917;
+  --focus: #1c1917;
+  --muted: #78716c;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.map-shell {
+  height: 100%;
+  min-height: 0;
+}
+
+.maplibregl-map {
+  font-family: inherit;
+}
+
+.maplibregl-map .maplibregl-ctrl-bottom-right {
+  bottom: var(--map-control-bottom, 1.25rem);
+  right: max(0.5rem, env(safe-area-inset-right));
+}
+
+.route-sheet {
+  transition: height 180ms ease;
+}
+
+.route-bubble {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 0.75rem;
+  border: 1px solid #e7e5e4;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #1c1917;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 1px 4px rgba(28, 25, 23, 0.16);
+  cursor: pointer;
+}
+
+.route-bubble[data-best="true"] {
+  background: #1c1917;
+  border-color: #1c1917;
+  color: #fafaf9;
+}
+
+.location-puck {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #1c1917;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 7px rgba(28, 25, 23, 0.18);
+}
+
+.weather-pill {
+  border: 1px solid #e7e5e4;
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 2px 8px;
+  color: #1c1917;
+  font: 600 11px/1.4 ui-sans-serif, system-ui, sans-serif;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(28, 25, 23, 0.14);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-sheet {
+    transition: none;
+  }
+}
